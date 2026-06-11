@@ -1,4 +1,4 @@
-// VERSION MARKER: v30-tammy-concepts-launch-20260610-1100
+// VERSION MARKER: v31-paginated-fetch-server-filter-20260611-1130
 // Single-file Cloudflare Worker — TAS Agency Performance Dashboard
 //
 // Bundles the dashboard HTML + Airtable proxy in one file.
@@ -362,14 +362,26 @@ async function detectBaseStructure(baseId, pat) {
   return null;
 }
 
-async function fetchTableRecords(baseId, tableId, pat) {
-  const url = new URL(`https://api.airtable.com/v0/${baseId}/${tableId}`);
-  url.searchParams.set("pageSize", "100");
-  url.searchParams.set("maxRecords", "200");
-  const res = await fetch(url.toString(), { headers: { Authorization: `Bearer ${pat}` } });
-  if (!res.ok) throw new Error(`API ${res.status}`);
-  const data = await res.json();
-  return data.records || [];
+async function fetchTableRecords(baseId, tableId, pat, filterFormula = null) {
+  // Paginates Airtable list endpoint. Capped at 5 pages (500 records) for safety.
+  // filterFormula is encoded server-side to drastically reduce response size +
+  // keep us under Cloudflare's 50 subrequest/invocation limit.
+  const records = [];
+  let offset = null;
+  let safety = 5;
+  do {
+    const url = new URL(`https://api.airtable.com/v0/${baseId}/${tableId}`);
+    url.searchParams.set("pageSize", "100");
+    if (filterFormula) url.searchParams.set("filterByFormula", filterFormula);
+    if (offset) url.searchParams.set("offset", offset);
+    const res = await fetch(url.toString(), { headers: { Authorization: `Bearer ${pat}` } });
+    if (!res.ok) throw new Error(`API ${res.status}`);
+    const data = await res.json();
+    records.push(...(data.records || []));
+    offset = data.offset || null;
+    safety--;
+  } while (offset && safety > 0);
+  return records;
 }
 
 function projectItem(r, sourceLabel, tableId) {
@@ -682,11 +694,22 @@ async function fetchPendingItemsForClient(client, pat) {
     }
 
     // Newer: one table. Older: two tables (internal + sheet).
+    // Use server-side filter to exclude finished items (Launched) — saves bandwidth
+    // and keeps us under the 50 subrequest budget. "Approved" passes through so
+    // we can still surface it as ads_to_launch.
     const fetches = meta.tableIds.map((tableId, idx) => {
       const sourceLabel = meta.structure === "newer"
         ? "unified"
         : (idx === 0 ? "internal" : "sheet");
-      return fetchTableRecords(client.baseId, tableId, pat).then((records) =>
+      let filterFormula = null;
+      if (meta.structure === "newer") {
+        // Newer: skip items where BOTH Internal and Client are Launched. Keep everything else.
+        filterFormula = "NOT(AND({Internal Status} = 'Launched', {Client Status} = 'Launched'))";
+      } else {
+        // Older split tables: single Status field per row. Drop Launched + empty.
+        filterFormula = "AND({Status} != BLANK(), {Status} != 'Launched')";
+      }
+      return fetchTableRecords(client.baseId, tableId, pat, filterFormula).then((records) =>
         records.map((r) => projectItem(r, sourceLabel, tableId))
       );
     });
