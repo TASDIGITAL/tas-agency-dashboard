@@ -1,4 +1,4 @@
-// VERSION MARKER: v31-paginated-fetch-server-filter-20260611-1130
+// VERSION MARKER: v32-server-filter-no-paginate-20260611-1145
 // Single-file Cloudflare Worker — TAS Agency Performance Dashboard
 //
 // Bundles the dashboard HTML + Airtable proxy in one file.
@@ -363,25 +363,16 @@ async function detectBaseStructure(baseId, pat) {
 }
 
 async function fetchTableRecords(baseId, tableId, pat, filterFormula = null) {
-  // Paginates Airtable list endpoint. Capped at 5 pages (500 records) for safety.
-  // filterFormula is encoded server-side to drastically reduce response size +
-  // keep us under Cloudflare's 50 subrequest/invocation limit.
-  const records = [];
-  let offset = null;
-  let safety = 5;
-  do {
-    const url = new URL(`https://api.airtable.com/v0/${baseId}/${tableId}`);
-    url.searchParams.set("pageSize", "100");
-    if (filterFormula) url.searchParams.set("filterByFormula", filterFormula);
-    if (offset) url.searchParams.set("offset", offset);
-    const res = await fetch(url.toString(), { headers: { Authorization: `Bearer ${pat}` } });
-    if (!res.ok) throw new Error(`API ${res.status}`);
-    const data = await res.json();
-    records.push(...(data.records || []));
-    offset = data.offset || null;
-    safety--;
-  } while (offset && safety > 0);
-  return records;
+  // Single request per table — pagination is too expensive under Cloudflare's 50
+  // subrequest budget. Server-side filter narrows results so 100 matches typically
+  // contain everything we need (Launched/empty items dropped).
+  const url = new URL(`https://api.airtable.com/v0/${baseId}/${tableId}`);
+  url.searchParams.set("pageSize", "100");
+  if (filterFormula) url.searchParams.set("filterByFormula", filterFormula);
+  const res = await fetch(url.toString(), { headers: { Authorization: `Bearer ${pat}` } });
+  if (!res.ok) throw new Error(`API ${res.status}`);
+  const data = await res.json();
+  return data.records || [];
 }
 
 function projectItem(r, sourceLabel, tableId) {
