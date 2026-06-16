@@ -1,4 +1,4 @@
-// VERSION MARKER: v32-server-filter-no-paginate-20260611-1145
+// VERSION MARKER: v33-fix-mislabeled-older-bases-20260611-1430
 // Single-file Cloudflare Worker — TAS Agency Performance Dashboard
 //
 // Bundles the dashboard HTML + Airtable proxy in one file.
@@ -318,14 +318,14 @@ const BASE_STRUCTURES = {
   "app6TWeAtCBq53Jip": { structure: "newer", tableIds: ["tblhU5yVNhVDwykUt"] }, // Oh Sheet
   "app1fEGMI5uHhjCcu": { structure: "newer", tableIds: ["tblhU5yVNhVDwykUt"] }, // Pongfinity
   "app1gTPkgdENaOvax": { structure: "newer", tableIds: ["tblhU5yVNhVDwykUt"] }, // MacKinnon Watches
-  "apptTtMw1Y9iCdLaF": { structure: "newer", tableIds: ["tblhU5yVNhVDwykUt"] }, // Subsoccer
+  "apptTtMw1Y9iCdLaF": { structure: "older", tableIds: ["tblhU5yVNhVDwykUt", "tblGC0TxnHI7lKaNQ"] }, // Subsoccer (corrected — has older schema)
   "appllDG4OmkK2Hdnn": { structure: "newer", tableIds: ["tblhU5yVNhVDwykUt"] }, // Gratsi
   "appeg00FJoTw4XETo": { structure: "newer", tableIds: ["tblhU5yVNhVDwykUt"] }, // LetterSchool
   "appGKEHmFtoWmxZQy": { structure: "newer", tableIds: ["tblhU5yVNhVDwykUt"] }, // The Sample Select
   "app1E0TJdfqpzWtRN": { structure: "newer", tableIds: ["tblhU5yVNhVDwykUt"] }, // Panther In The Room - PalmEase
   "appDEAC0DoBSOiEyH": { structure: "newer", tableIds: ["tblhU5yVNhVDwykUt"] }, // Niagara Sleep Solution
   "appFNyicr82i2ROQw": { structure: "newer", tableIds: ["tblhU5yVNhVDwykUt"] }, // SOS Performance Gear
-  "app2gFVJaiGTgLtiM": { structure: "newer", tableIds: ["tblhU5yVNhVDwykUt"] }, // Mattress Central
+  "app2gFVJaiGTgLtiM": { structure: "older", tableIds: ["tblhU5yVNhVDwykUt", "tblGC0TxnHI7lKaNQ"] }, // Mattress Central (corrected — has older schema)
   "appHtn9N8Si2C4peK": { structure: "newer", tableIds: ["tblhU5yVNhVDwykUt"] }, // Zmedskin
   "applQdA4FOBWqEHcS": { structure: "newer", tableIds: ["tblhU5yVNhVDwykUt"] }, // Shadana Yoga
   "appVSXwwoYt0jF8xi": { structure: "newer", tableIds: ["tblhU5yVNhVDwykUt"] }, // Kiln Frog
@@ -377,20 +377,21 @@ async function fetchTableRecords(baseId, tableId, pat, filterFormula = null) {
 
 function projectItem(r, sourceLabel, tableId) {
   const f = r.fields;
-  // Newer: has "Internal Status" + "Client Status".
-  // Older internal: just "Status" (= internal workflow).
-  // Older sheet:    just "Status" (= client approval state).
+  // Schema-agnostic status detection (handles mislabeled bases too):
+  // Prefer NEWER fields if present. Else fall back to plain "Status",
+  // routing to internal or client based on sourceLabel.
   let internal = null;
   let clientStatus = null;
   if ("Internal Status" in f || "Client Status" in f) {
     internal = f["Internal Status"] || null;
     clientStatus = f["Client Status"] || null;
-  } else if (sourceLabel === "sheet") {
-    // Older "Creative Sheet" — Status is the CLIENT-facing approval state
-    clientStatus = f["Status"] || null;
-  } else {
-    // Older "(Internal) Creative Design" — Status is the INTERNAL workflow
-    internal = f["Status"] || null;
+  } else if ("Status" in f) {
+    if (sourceLabel === "sheet") {
+      clientStatus = f["Status"];
+    } else {
+      // "internal" or "unified" (newer base that turned out to lack split fields)
+      internal = f["Status"];
+    }
   }
   let batch = f["Batch"] || f["Batch (from Concepts)"] || null;
   if (Array.isArray(batch)) batch = batch[0] || null;
@@ -685,22 +686,21 @@ async function fetchPendingItemsForClient(client, pat) {
     }
 
     // Newer: one table. Older: two tables (internal + sheet).
-    // Use server-side filter to exclude finished items (Launched) — saves bandwidth
-    // and keeps us under the 50 subrequest budget. "Approved" passes through so
-    // we can still surface it as ads_to_launch.
+    // Universal server-side filter wraps each possible field in IFERROR so it
+    // works on BOTH schemas (newer unified OR older single-Status table),
+    // protecting us from mislabeled bases. Keeps any row whose value is set
+    // and is NOT 'Launched'. Saves bandwidth + stays under 50 subrequest budget.
+    const universalFilter =
+      "OR(" +
+        "IFERROR(AND({Internal Status} != BLANK(), {Internal Status} != 'Launched'), FALSE())," +
+        "IFERROR(AND({Client Status} != BLANK(), {Client Status} != 'Launched'), FALSE())," +
+        "IFERROR(AND({Status} != BLANK(), {Status} != 'Launched'), FALSE())" +
+      ")";
     const fetches = meta.tableIds.map((tableId, idx) => {
       const sourceLabel = meta.structure === "newer"
         ? "unified"
         : (idx === 0 ? "internal" : "sheet");
-      let filterFormula = null;
-      if (meta.structure === "newer") {
-        // Newer: skip items where BOTH Internal and Client are Launched. Keep everything else.
-        filterFormula = "NOT(AND({Internal Status} = 'Launched', {Client Status} = 'Launched'))";
-      } else {
-        // Older split tables: single Status field per row. Drop Launched + empty.
-        filterFormula = "AND({Status} != BLANK(), {Status} != 'Launched')";
-      }
-      return fetchTableRecords(client.baseId, tableId, pat, filterFormula).then((records) =>
+      return fetchTableRecords(client.baseId, tableId, pat, universalFilter).then((records) =>
         records.map((r) => projectItem(r, sourceLabel, tableId))
       );
     });
