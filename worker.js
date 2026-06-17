@@ -1,4 +1,4 @@
-// VERSION MARKER: v33-fix-mislabeled-older-bases-20260611-1430
+// VERSION MARKER: v34-per-structure-filter-20260611-1530
 // Single-file Cloudflare Worker — TAS Agency Performance Dashboard
 //
 // Bundles the dashboard HTML + Airtable proxy in one file.
@@ -686,21 +686,18 @@ async function fetchPendingItemsForClient(client, pat) {
     }
 
     // Newer: one table. Older: two tables (internal + sheet).
-    // Universal server-side filter wraps each possible field in IFERROR so it
-    // works on BOTH schemas (newer unified OR older single-Status table),
-    // protecting us from mislabeled bases. Keeps any row whose value is set
-    // and is NOT 'Launched'. Saves bandwidth + stays under 50 subrequest budget.
-    const universalFilter =
-      "OR(" +
-        "IFERROR(AND({Internal Status} != BLANK(), {Internal Status} != 'Launched'), FALSE())," +
-        "IFERROR(AND({Client Status} != BLANK(), {Client Status} != 'Launched'), FALSE())," +
-        "IFERROR(AND({Status} != BLANK(), {Status} != 'Launched'), FALSE())" +
-      ")";
+    // Per-structure server-side filter (kept under 50 subrequest budget).
     const fetches = meta.tableIds.map((tableId, idx) => {
       const sourceLabel = meta.structure === "newer"
         ? "unified"
         : (idx === 0 ? "internal" : "sheet");
-      return fetchTableRecords(client.baseId, tableId, pat, universalFilter).then((records) =>
+      let filterFormula = null;
+      if (meta.structure === "newer") {
+        filterFormula = "NOT(AND({Internal Status} = 'Launched', {Client Status} = 'Launched'))";
+      } else {
+        filterFormula = "AND({Status} != BLANK(), {Status} != 'Launched')";
+      }
+      return fetchTableRecords(client.baseId, tableId, pat, filterFormula).then((records) =>
         records.map((r) => projectItem(r, sourceLabel, tableId))
       );
     });
