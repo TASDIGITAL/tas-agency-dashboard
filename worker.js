@@ -1,4 +1,4 @@
-// VERSION MARKER: v34-per-structure-filter-20260611-1530
+// VERSION MARKER: v35-team-updates-lucas-remove-linda-beshoo-20260611-1600
 // Single-file Cloudflare Worker — TAS Agency Performance Dashboard
 //
 // Bundles the dashboard HTML + Airtable proxy in one file.
@@ -1199,9 +1199,9 @@ const PEOPLE = [
   { slug: "patrick",  display: "Patrick",  role: "Email CSM",           group: "csm", field: "csm",                  match: ["patrick"] },
   // === Growth Strategist (media buyer for clients where we do creatives) ===
   { slug: "indransh", display: "Indransh", role: "Growth Strategist",   group: "growth_strategist", field: "mediaBuyers", match: ["indransh"], alwaysShow: false },
+  { slug: "lucas",    display: "Lucas",    role: "Growth Strategist",   group: "growth_strategist", field: "mediaBuyers", match: ["lucas"],    alwaysShow: false },
   // === Creative Strategists ===
   { slug: "rajan",    display: "Rajan",    role: "Creative Strategist", group: "cs",  field: "creativeStrategists",  match: ["rajan"],   alwaysShow: false },
-  { slug: "linda",    display: "Linda",    role: "Creative Strategist", group: "cs",  field: "creativeStrategists",  match: ["linda"],   alwaysShow: true  },
   { slug: "zainab",   display: "Zainab",   role: "Creative Strategist", group: "cs",  field: "creativeStrategists",  match: ["zainab"],  alwaysShow: false },
   { slug: "aziz",     display: "Aziz",     role: "Creative Strategist", group: "cs",  field: "creativeStrategists",  match: ["abdelaziz", "aziz"], alwaysShow: false },
   // === Video Editors === (matched via item.assignee)
@@ -1212,7 +1212,6 @@ const PEOPLE = [
   // === Designers === (matched via item.assignee)
   { slug: "nayyab",  display: "Nayyab", role: "Designer", group: "designer", field: "designers", match: ["nayyab"],  alwaysShow: false },
   { slug: "lana",    display: "Lana",   role: "Designer", group: "designer", field: "designers", match: ["lana"],    alwaysShow: false },
-  { slug: "beshoo",  display: "Beshoo", role: "Designer", group: "designer", field: "designers", match: ["beshoo", "besho"], alwaysShow: false },
   { slug: "rahim",   display: "Rahim",  role: "Designer", group: "designer", field: "designers", match: ["rahim"],   alwaysShow: false },
 ];
 
@@ -1281,7 +1280,7 @@ function daysSince(dateStr) {
 // 4. Sent to Video Editor / Video Editing → 🎬 In Video Editing
 // Editor/Designer name match strings — used to recognize statuses like "Sent to Med"
 const EDITOR_MATCH_STRINGS = ["muhammad faiz", "faiz", "nadish", "feriel", " med ", " med."];
-const DESIGNER_MATCH_STRINGS = ["nayyab", "nayya", "lana", "beshoo", "besho", "rahim"];
+const DESIGNER_MATCH_STRINGS = ["nayyab", "nayya", "lana", "rahim"];
 function statusMentionsEditor(status) {
   const s = " " + String(status).toLowerCase() + " ";
   return EDITOR_MATCH_STRINGS.some((m) => s.includes(m));
