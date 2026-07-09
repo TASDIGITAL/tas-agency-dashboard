@@ -1,4 +1,4 @@
-// VERSION MARKER: v35-team-updates-lucas-remove-linda-beshoo-20260611-1600
+// VERSION MARKER: v36-sent-dates-inprogress-adslaunch-managed-20260708
 // Single-file Cloudflare Worker — TAS Agency Performance Dashboard
 //
 // Bundles the dashboard HTML + Airtable proxy in one file.
@@ -705,7 +705,11 @@ async function fetchPendingItemsForClient(client, pat) {
     const groups = await Promise.all(fetches);
     const allItems = groups.flat();
     const pending = allItems.filter(isPending);
-    const adsToLaunch = allItems.filter(isAdToLaunch);
+    // Ads to Launch only applies to clients whose ads WE manage (a media buyer is
+    // assigned). Self-launching clients (e.g. Pongfinity, Clean Green) don't update
+    // statuses reliably — showing their launch queue just confuses CSMs/strategists.
+    const adsManaged = Array.isArray(client.mediaBuyers) && client.mediaBuyers.length > 0;
+    const adsToLaunch = adsManaged ? allItems.filter(isAdToLaunch) : [];
 
     return {
       brand: client.brand,
@@ -717,6 +721,7 @@ async function fetchPendingItemsForClient(client, pat) {
       designers: client.designers || [],
       videoEditors: client.videoEditors || [],
       mediaBuyers: client.mediaBuyers || [],
+      adsManaged: adsManaged,
       structure: meta.structure,
       items: pending,
       adsToLaunch: adsToLaunch,
@@ -732,6 +737,7 @@ async function fetchPendingItemsForClient(client, pat) {
       designers: client.designers || [],
       videoEditors: client.videoEditors || [],
       mediaBuyers: client.mediaBuyers || [],
+      adsManaged: Array.isArray(client.mediaBuyers) && client.mediaBuyers.length > 0,
       items: [],
       adsToLaunch: [],
       error: String(e.message || e),
@@ -1074,6 +1080,10 @@ const PIPELINE_HTML = `<!doctype html>
   }
   .item-card .item-dates .date-label { color: var(--ink-faint); }
   .item-card .item-dates .date-val { color: var(--ink-soft); font-variant-numeric: tabular-nums; }
+  .item-card .item-dates .sent-date { background: var(--brand-blue-light); border-radius: 6px; padding: 2px 7px; }
+  .item-card .item-dates .sent-date .date-label { color: var(--brand-blue); font-weight: 700; }
+  .item-card .item-dates .sent-date .date-val { color: var(--brand-blue); font-weight: 700; }
+  .cap-note { margin-top: 10px; font-size: 12px; color: var(--ink-faint); font-style: italic; }
   .concept-card, .ugc-card {
     background: var(--card); border: 1px solid var(--line); border-radius: 10px;
     padding: 14px 16px; box-shadow: var(--shadow);
@@ -1272,6 +1282,20 @@ function daysSince(dateStr) {
   return Math.floor((Date.now() - d.getTime()) / (1000 * 60 * 60 * 24));
 }
 
+// === "Sent" date per bucket ===
+// A record is CREATED the moment it's sent to the editor/designer, so for
+// sent-to-production buckets the sent date IS the created date.
+// For Awaiting Client, the last modification is (almost always) the status flip
+// to "Pending for Approval" — used as the sent-to-client date.
+function sentDateFor(item, bucket) {
+  if (bucket === "video" || bucket === "design" || bucket === "sent_for_editing") return item.created || null;
+  if (bucket === "awaiting_client") return item.lastModified || null;
+  return null;
+}
+function sentLabelFor(bucket) {
+  return bucket === "awaiting_client" ? "Sent to client" : "Sent";
+}
+
 // === Bucketing logic ===
 // Priority order:
 // 1. Revisions Needed / Denied  → 🔄 Needs Revision (team must take action)
@@ -1334,6 +1358,16 @@ function bucketOf(item) {
 
   // === INTERNAL-side checks — only fire if no client bucket matched above ===
   if (internal) {
+    // Work actively in progress (or on hold) with the editor/designer — split by type.
+    // Checked BEFORE editor-name / "video editing" matching so "Video Editing in
+    // Progress..." lands here rather than in the Sent bucket.
+    if (internal.includes("in progress") || internal.includes("on hold")) {
+      if (internal.includes("static") || internal.includes("design")) return "design_in_progress";
+      if (internal.includes("video") || internal.includes("editing")) return "video_in_progress";
+      const t = String(item.type || "").toLowerCase();
+      if (t.includes("static") || t.includes("image") || t.includes("carousel") || t.includes("design")) return "design_in_progress";
+      return "video_in_progress";
+    }
     // "Sent to <person>" — match against known editor/designer names
     if (statusMentionsEditor(internal)) return "video";
     if (statusMentionsDesigner(internal)) return "design";
@@ -1343,7 +1377,7 @@ function bucketOf(item) {
     if (internal.includes("revisions submitted")) return "awaiting_internal";
     // Other awaiting-internal states (Ad Submitted internally, QA, Strategist review)
     if (internal.includes("ad submitted") || internal.includes("submitted") || internal.includes("review") || internal.includes("qa") || internal.includes("strategist")) return "awaiting_internal";
-    // Production
+    // Sent for production
     if (internal.includes("designer") || internal.includes("static design")) return "design";
     if (internal.includes("video editor") || internal.includes("video editing") || internal.includes("editor")) return "video";
   }
@@ -1351,12 +1385,14 @@ function bucketOf(item) {
   return "other";
 }
 
-// 8 bucket definitions in display order (used everywhere)
+// 10 bucket definitions in display order (used everywhere)
 const BUCKETS = [
   { id: "concepts",            label: "Concepts",            icon: "💡", color: "#B87600" },
   { id: "ugc",                 label: "Creators",            icon: "🎭", color: "#4A5BA9" },
-  { id: "video",               label: "In Video",            icon: "🎬", color: "#2821B5" },
-  { id: "design",              label: "In Design",           icon: "📐", color: "#8321C8" },
+  { id: "video",               label: "Sent to Editor",      icon: "🎬", color: "#2821B5" },
+  { id: "design",              label: "Sent to Designer",    icon: "📐", color: "#8321C8" },
+  { id: "video_in_progress",   label: "Videos in Progress",  icon: "✂️", color: "#1D4ED8" },
+  { id: "design_in_progress",  label: "Designs in Progress", icon: "🎨", color: "#9D3BD3" },
   { id: "awaiting_internal",   label: "Awaiting Internal",   icon: "👀", color: "#0E9F70" },
   { id: "awaiting_client",     label: "Awaiting Client",     icon: "📤", color: "#0369A1" },
   { id: "internal_revisions",  label: "Internal Revisions",  icon: "🛠",  color: "#C97200" },
@@ -1378,8 +1414,10 @@ const GROWTH_STRATEGIST_BUCKETS = [
 const BUCKET_LONG = {
   concepts:            "💡 Concepts Pending",
   ugc:                 "🎭 Creators Pending",
-  video:               "🎬 In Video Editing",
-  design:              "📐 In Design",
+  video:               "🎬 Sent to Video Editor",
+  design:              "📐 Sent to Designer",
+  video_in_progress:   "✂️ Videos in Progress",
+  design_in_progress:  "🎨 Designs in Progress",
   awaiting_internal:   "👀 Awaiting Internal Feedback",
   awaiting_client:     "📤 Awaiting Client Feedback",
   internal_revisions:  "🛠 Internal Revisions",
@@ -1453,7 +1491,7 @@ function bucketOfForCreativeRole(item) {
   if (internal) {
     if (internal.includes("revision") && !internal.includes("submitted")) return "needs_revisions";
     if (internal.includes("revisions submitted") || internal.includes("ad submitted") || internal.includes("submitted") || internal.includes("review") || internal.includes("qa") || internal.includes("strategist")) return "awaiting_strategist";
-    if (internal.includes("in progress") || internal.includes("editing in progress") || internal.includes("design in progress")) return "in_progress";
+    if (internal.includes("in progress") || internal.includes("editing in progress") || internal.includes("design in progress") || internal.includes("on hold")) return "in_progress";
     // "Sent to <person>" — match against known editor names
     if (statusMentionsEditor(internal)) return "sent_for_editing";
     if (statusMentionsDesigner(internal)) return "sent_for_editing";
@@ -1508,6 +1546,8 @@ function computeBuckets(client) {
     ugc:                client.ugcCount || 0,
     video:              items.filter((i) => i.bucket === "video").length,
     design:             items.filter((i) => i.bucket === "design").length,
+    video_in_progress:  items.filter((i) => i.bucket === "video_in_progress").length,
+    design_in_progress: items.filter((i) => i.bucket === "design_in_progress").length,
     awaiting_internal:  items.filter((i) => i.bucket === "awaiting_internal").length,
     awaiting_client:    items.filter((i) => i.bucket === "awaiting_client").length,
     internal_revisions: items.filter((i) => i.bucket === "internal_revisions").length,
@@ -1664,7 +1704,7 @@ function renderLanding() {
           \${list.map((p) => \`
             <div class="csm-card csm-card-\${p.group}" onclick="goCsm('\${p.slug}')">
               <div class="name">\${p.display}</div>
-              <div class="role">\${p.role} · \${p.clientCount} client\${p.clientCount === 1 ? "" : "s"} · \${p.total} total\${p.monthlyLabel ? " · " + p.monthlyLabel : ""}</div>
+              <div class="role">\${p.role} · \${p.clientCount} client\${p.clientCount === 1 ? "" : "s"} · \${p.total} total assets\${p.monthlyLabel ? " · " + p.monthlyLabel : ""}</div>
               <div class="breakdown">
                 \${getBucketsForGroup(p.group).map((b) => {
                   const n = p.buckets[b.id] || 0;
@@ -1759,7 +1799,7 @@ function renderCsm(personSlug) {
                 const n = groupB[bd.id] || 0;
                 return \`<span class="pill-count \${n === 0 ? "zero" : ""}" title="\${bd.label}">\${bd.icon} \${n}</span>\`;
               }).join("")}
-              <span class="group-total-pill">\${total} total</span>
+              <span class="group-total-pill">\${total} total assets</span>
             </div>
           </div>
         \`;
@@ -1809,7 +1849,11 @@ function renderClient(personSlug, brandName) {
   if (isCreativeRole) {
     items = itemsForPerson(client, personDef)
       .filter((i) => itemMatchesRole(i, personDef.group))
-      .map((i) => ({ ...i, bucket: bucketOfForCreativeRole(i), days: daysSince(i.lastModified) }));
+      .map((i) => {
+        const bucket = bucketOfForCreativeRole(i);
+        const sent = sentDateFor(i, bucket);
+        return { ...i, bucket, sent, days: daysSince(sent || i.lastModified) };
+      });
     byBucket = {
       sent_for_editing:    items.filter((i) => i.bucket === "sent_for_editing"),
       in_progress:         items.filter((i) => i.bucket === "in_progress"),
@@ -1819,14 +1863,21 @@ function renderClient(personSlug, brandName) {
       client_revisions:    items.filter((i) => i.bucket === "client_revisions"),
     };
   } else {
-    items = itemsForPerson(client, personDef).map((i) => ({ ...i, bucket: bucketOf(i), days: daysSince(i.lastModified) }));
+    items = itemsForPerson(client, personDef).map((i) => {
+      const bucket = bucketOf(i);
+      const sent = sentDateFor(i, bucket);
+      return { ...i, bucket, sent, days: daysSince(sent || i.lastModified) };
+    });
     byBucket = {
       video:              items.filter((i) => i.bucket === "video"),
       design:             items.filter((i) => i.bucket === "design"),
+      video_in_progress:  items.filter((i) => i.bucket === "video_in_progress"),
+      design_in_progress: items.filter((i) => i.bucket === "design_in_progress"),
       awaiting_internal:  items.filter((i) => i.bucket === "awaiting_internal"),
       awaiting_client:    items.filter((i) => i.bucket === "awaiting_client"),
       internal_revisions: items.filter((i) => i.bucket === "internal_revisions"),
       client_revisions:   items.filter((i) => i.bucket === "client_revisions"),
+      ads_to_launch:      items.filter((i) => i.bucket === "ads_to_launch"),
     };
   }
   const baseUrl = client.baseId ? \`https://airtable.com/\${client.baseId}\` : null;
@@ -1842,12 +1893,15 @@ function renderClient(personSlug, brandName) {
       \${renderBucketSection("awaiting_client", "📨 Awaiting Client Review", byBucket.awaiting_client, client.baseId)}
       \${renderBucketSection("client_revisions", "🔄 Client Revisions", byBucket.client_revisions, client.baseId)}
     \` : \`
-      \${renderBucketSection("video", "🎬 In Video Editing", byBucket.video, client.baseId)}
-      \${renderBucketSection("design", "📐 In Design", byBucket.design, client.baseId)}
+      \${renderBucketSection("video", "🎬 Sent to Video Editor", byBucket.video, client.baseId)}
+      \${renderBucketSection("design", "📐 Sent to Designer", byBucket.design, client.baseId)}
+      \${renderBucketSection("video_in_progress", "✂️ Videos in Progress", byBucket.video_in_progress, client.baseId)}
+      \${renderBucketSection("design_in_progress", "🎨 Designs in Progress", byBucket.design_in_progress, client.baseId)}
       \${renderBucketSection("awaiting_internal", "👀 Awaiting Internal Feedback", byBucket.awaiting_internal, client.baseId)}
       \${renderBucketSection("awaiting_client", "📤 Awaiting Client Feedback", byBucket.awaiting_client, client.baseId)}
       \${renderBucketSection("internal_revisions", "🛠 Internal Revisions", byBucket.internal_revisions, client.baseId)}
       \${renderBucketSection("client_revisions", "🔄 Client Revisions", byBucket.client_revisions, client.baseId)}
+      \${renderBucketSection("ads_to_launch", "🚀 Ads to Launch", byBucket.ads_to_launch, client.baseId, 15)}
     \`}
   \`;
   // Lazy-load concepts + UGC for this client (skip for editors/designers — not their concern)
@@ -1880,12 +1934,17 @@ function fmtDate(s) {
   catch (e) { return "—"; }
 }
 
-function renderBucketSection(bucket, title, items, baseId) {
+function renderBucketSection(bucket, title, items, baseId, cap) {
   if (!items.length) return "";
-  const sorted = [...items].sort((a, b) => (b.days || 0) - (a.days || 0));
+  let sorted = [...items].sort((a, b) => (b.days || 0) - (a.days || 0));
+  // Capped sections (e.g. Ads to Launch): the count is what matters — the media
+  // buyer works from their own table. Show up to \`cap\` items, label the rest "+".
+  const capped = cap && sorted.length > cap;
+  const countLabel = capped ? cap + "+" : String(items.length);
+  if (capped) sorted = sorted.slice(0, cap);
   return \`
     <div class="bucket-section \${bucket}">
-      <h2>\${title} <span class="count">\${items.length}</span></h2>
+      <h2>\${title} <span class="count">\${countLabel}</span></h2>
       <div class="items-grid">
       \${sorted.map((i) => {
         const recordUrl = (baseId && i.id && i.tableId) ? \`https://airtable.com/\${baseId}/\${i.tableId}/\${i.id}\` : null;
@@ -1911,6 +1970,7 @@ function renderBucketSection(bucket, title, items, baseId) {
               \${externalRow}
             </div>
             <div class="item-dates">
+              \${i.sent ? \`<span class="sent-date"><span class="date-label">\${sentLabelFor(bucket)}</span> <span class="date-val">\${fmtDate(i.sent)}</span></span>\` : ""}
               <span><span class="date-label">Created</span> <span class="date-val">\${fmtDate(i.created)}</span></span>
               <span><span class="date-label">Modified</span> <span class="date-val">\${fmtDate(i.lastModified)}</span></span>
             </div>
@@ -1918,6 +1978,7 @@ function renderBucketSection(bucket, title, items, baseId) {
         \`;
       }).join("")}
       </div>
+      \${capped ? \`<div class="cap-note">Showing \${cap} of \${items.length} — the full list lives in the client's Airtable base.</div>\` : ""}
     </div>
   \`;
 }
