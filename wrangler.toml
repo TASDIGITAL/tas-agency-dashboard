@@ -1,3 +1,10 @@
 name = "tas-agency-creative-dashboard"
 main = "worker.js"
 compatibility_date = "2024-09-23"
+workers_dev = true
+
+# Custom domain on the new tas-digital.ai zone — the pipeline loads at the root
+# of this subdomain (worker serves PIPELINE_HTML for pipeline.* hosts).
+routes = [
+  { pattern = "pipeline.tas-digital.ai", custom_domain = true }
+]
