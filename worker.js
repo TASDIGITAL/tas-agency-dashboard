@@ -1,4 +1,4 @@
-// VERSION MARKER: v36-sent-dates-inprogress-adslaunch-managed-20260708
+// VERSION MARKER: v37-video-editors-overview-20260709
 // Single-file Cloudflare Worker — TAS Agency Performance Dashboard
 //
 // Bundles the dashboard HTML + Airtable proxy in one file.
@@ -1041,6 +1041,30 @@ const PIPELINE_HTML = `<!doctype html>
   .client-row.empty { opacity: .55; cursor: default; }
   .client-row.empty:hover { transform: none; border-color: var(--line); box-shadow: var(--shadow); }
 
+  /* === Video Editors overview (homepage) === */
+  .ve-overview { margin-top: 8px; }
+  .ve-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 14px; }
+  .ve-card {
+    background: white; border: 1px solid var(--line); border-radius: 14px;
+    padding: 16px 18px; box-shadow: var(--shadow); cursor: pointer;
+    transition: transform .12s ease, border-color .12s ease;
+  }
+  .ve-card:hover { transform: translateY(-2px); border-color: var(--brand-blue-soft); }
+  .ve-card .ve-name { font-size: 16px; font-weight: 800; margin-bottom: 12px; }
+  .ve-stat { margin-bottom: 10px; }
+  .ve-stat:last-child { margin-bottom: 0; }
+  .ve-stat .ve-stat-top {
+    display: flex; justify-content: space-between; align-items: baseline;
+    font-size: 12px; margin-bottom: 4px;
+  }
+  .ve-stat .ve-stat-label { color: var(--ink-faint); font-weight: 600; text-transform: uppercase; letter-spacing: .05em; font-size: 10px; }
+  .ve-stat .ve-stat-val { font-weight: 800; font-size: 15px; font-variant-numeric: tabular-nums; }
+  .ve-bar { height: 6px; border-radius: 999px; background: var(--brand-blue-light); overflow: hidden; }
+  .ve-bar > span { display: block; height: 100%; border-radius: 999px; }
+  .ve-bar.clients > span { background: #0E9F70; }
+  .ve-bar.concepts > span { background: var(--brand-purple, #8321C8); }
+  .ve-bar.videos > span { background: var(--brand-blue); }
+
   /* === Client page === */
   .bucket-section { margin-bottom: 26px; }
   .bucket-section h2 {
@@ -1718,6 +1742,50 @@ function renderLanding() {
     \`;
   };
 
+  // === Video Editors overview: clients / total concepts / total videos per editor ===
+  // Concepts & videos come from the Team table rollups (same source as the Airtable
+  // dashboard); client counts from live pipeline assignments (multi-base groups = 1).
+  const veOverview = (() => {
+    const editors = PEOPLE.filter((p) => p.group === "video_editor").map((p) => {
+      const clients = (DATA.clients || []).filter((c) => personMatches(c, p));
+      const stats = lookupMonthlyForPerson(p) || {};
+      return {
+        slug: p.slug,
+        display: p.display,
+        clients: countUniqueGroups(clients),
+        concepts: stats.veConcepts || 0,
+        videos: stats.veVideos || 0,
+      };
+    }).filter((v) => v.clients > 0 || v.concepts > 0 || v.videos > 0);
+    if (!editors.length) return "";
+    const max = {
+      clients: Math.max(...editors.map((v) => v.clients), 1),
+      concepts: Math.max(...editors.map((v) => v.concepts), 1),
+      videos: Math.max(...editors.map((v) => v.videos), 1),
+    };
+    const statRow = (label, val, key) => \`
+      <div class="ve-stat">
+        <div class="ve-stat-top"><span class="ve-stat-label">\${label}</span><span class="ve-stat-val">\${val}</span></div>
+        <div class="ve-bar \${key}"><span style="width:\${Math.round((val / max[key]) * 100)}%"></span></div>
+      </div>
+    \`;
+    return \`
+      <div class="group-section ve-overview">
+        <h2 class="group-header">🎥 Video Editors — Totals</h2>
+        <div class="ve-grid">
+          \${editors.map((v) => \`
+            <div class="ve-card" onclick="goCsm('\${v.slug}')">
+              <div class="ve-name">\${v.display}</div>
+              \${statRow("Clients", v.clients, "clients")}
+              \${statRow("Total Concepts", v.concepts, "concepts")}
+              \${statRow("Total Videos", v.videos, "videos")}
+            </div>
+          \`).join("")}
+        </div>
+      </div>
+    \`;
+  })();
+
   root.innerHTML = \`
     <h1>Who's checking in?</h1>
     <div class="sub">Click your name to see your clients and what needs attention.</div>
@@ -1726,6 +1794,7 @@ function renderLanding() {
     \${renderGroup("growth_strategist")}
     \${renderGroup("video_editor")}
     \${renderGroup("designer")}
+    \${veOverview}
   \`;
 }
 
