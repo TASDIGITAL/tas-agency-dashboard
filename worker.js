@@ -1,4 +1,4 @@
-// VERSION MARKER: v37-video-editors-overview-20260709
+// VERSION MARKER: v38-pipeline-custom-domain-20260709
 // Single-file Cloudflare Worker — TAS Agency Performance Dashboard
 //
 // Bundles the dashboard HTML + Airtable proxy in one file.
@@ -2677,7 +2677,11 @@ export default {
     if (url.pathname === "/pipeline/ugc/api") {
       return handleUgcAggregate(request, env);
     }
-    if (url.pathname === "/pipeline") {
+    // On the dedicated pipeline domain (pipeline.tas-digital.ai), the pipeline
+    // IS the homepage — no /pipeline path needed. API calls above still use
+    // absolute /pipeline/* paths, which work on any hostname.
+    const isPipelineHost = url.hostname.startsWith("pipeline.");
+    if (url.pathname === "/pipeline" || (isPipelineHost && url.pathname === "/")) {
       return new Response(PIPELINE_HTML, {
         headers: {
           "Content-Type": "text/html; charset=utf-8",
