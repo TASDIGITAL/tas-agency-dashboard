@@ -788,6 +788,79 @@ async function handlePipeline(request, env) {
   }
 }
 
+// === Launch Digest: simplified "Ads to Launch" summary for a Growth Strategist ===
+// GET /api/launch-digest?person=indransh
+// Reuses the exact same client-matching (personMatches) and Ads-to-Launch filtering
+// (isAdToLaunch / fetchPendingItemsForClient) as the pipeline dashboard, so counts here
+// always agree with what the dashboard shows that person. Built for the daily n8n → Slack digest.
+function classifyItemFormat(item) {
+  const t = String(item.type || "").toLowerCase().trim();
+  if (t.includes("video")) return "video";
+  if (t.includes("static") || t.includes("image") || t.includes("carousel") || t.includes("design")) return "static";
+  return "other";
+}
+
+async function handleLaunchDigest(request, env) {
+  if (!env.AIRTABLE_PAT) {
+    return new Response(JSON.stringify({ error: "AIRTABLE_PAT not set" }),
+      { status: 500, headers: { "Content-Type": "application/json" } });
+  }
+  const url = new URL(request.url);
+  const personSlug = (url.searchParams.get("person") || "").toLowerCase().trim();
+  const personDef = PEOPLE.find((p) => p.group === "growth_strategist" && p.slug === personSlug);
+  if (!personDef) {
+    return new Response(JSON.stringify({ error: "missing/unknown ?person= (e.g. ?person=indransh)" }),
+      { status: 400, headers: { "Content-Type": "application/json" } });
+  }
+  const force = url.searchParams.get("refresh") === "1";
+  const cacheKey = new Request(url.toString(), { method: "GET" });
+  const cache = caches.default;
+  if (!force) {
+    const hit = await cache.match(cacheKey);
+    if (hit) return hit;
+  }
+  try {
+    const { clients } = await fetchActiveClientsWithBase(env);
+    const matching = clients.filter((c) => personMatches(c, personDef));
+    const results = await Promise.all(matching.map((c) => fetchPendingItemsForClient(c, env.AIRTABLE_PAT)));
+
+    const clientSummaries = [];
+    const totals = { video: 0, static: 0, other: 0 };
+    for (const r of results) {
+      const items = r.adsToLaunch || [];
+      if (items.length === 0) continue;
+      const counts = { video: 0, static: 0, other: 0 };
+      for (const item of items) counts[classifyItemFormat(item)]++;
+      totals.video += counts.video;
+      totals.static += counts.static;
+      totals.other += counts.other;
+      clientSummaries.push({ brand: r.brand, ...counts, total: items.length });
+    }
+    clientSummaries.sort((a, b) => b.total - a.total);
+
+    const payload = {
+      generatedAt: new Date().toISOString(),
+      person: personDef.display,
+      totalClients: clientSummaries.length,
+      totalCreatives: totals.video + totals.static + totals.other,
+      totals,
+      clients: clientSummaries,
+    };
+    const response = new Response(JSON.stringify(payload), {
+      headers: {
+        "Content-Type": "application/json",
+        "Cache-Control": "public, max-age=600",
+        "Access-Control-Allow-Origin": "*",
+      },
+    });
+    await cache.put(cacheKey, response.clone());
+    return response;
+  } catch (e) {
+    return new Response(JSON.stringify({ error: String(e.message || e) }),
+      { status: 502, headers: { "Content-Type": "application/json" } });
+  }
+}
+
 
 const PIPELINE_HTML = `<!doctype html>
 <html lang="en">
@@ -2676,6 +2749,9 @@ export default {
     }
     if (url.pathname === "/pipeline/ugc/api") {
       return handleUgcAggregate(request, env);
+    }
+    if (url.pathname === "/api/launch-digest") {
+      return handleLaunchDigest(request, env);
     }
     // On the dedicated pipeline domain (pipeline.tas-digital.ai), the pipeline
     // IS the homepage — no /pipeline path needed. API calls above still use
