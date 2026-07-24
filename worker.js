@@ -428,6 +428,108 @@ function projectItem(r, sourceLabel, tableId) {
 const CONCEPTS_TBL = "tblRlcp1ibmS7U7HG";
 const UGC_TBL = "tblRsVqiqUaZRcQYd";
 
+// Priority Signals: daily-scanned Slack + Fathom signals about creative
+// prioritization requests / creative issues / creative PM notes. Populated by a
+// scheduled background job (an n8n workflow, not this worker) — this just reads +
+// displays them, and lets someone tick "Reviewed" from the dashboard.
+const PRIORITY_SIGNALS_TBL = "tblyBJ7dPBRR6ysbE";
+
+function projectSignal(r) {
+  const f = r.fields;
+  return {
+    id: r.id,
+    summary: f["Summary"] || "",
+    date: f["Date"] || null,
+    source: f["Source"] || null,
+    signalType: f["Signal Type"] || null,
+    whoSaidIt: f["Who Said It"] || null,
+    regarding: f["Said To / Regarding"] || null,
+    client: f["Client / Brand"] || null,
+    quote: f["Quote"] || null,
+    sourceLink: f["Source Link"] || null,
+    reviewed: !!f["Reviewed"],
+  };
+}
+
+async function handlePrioritySignals(request, env) {
+  if (!env.AIRTABLE_PAT) {
+    return new Response(JSON.stringify({ error: "AIRTABLE_PAT not set" }),
+      { status: 500, headers: { "Content-Type": "application/json" } });
+  }
+  const url = new URL(request.url);
+  const force = url.searchParams.get("refresh") === "1";
+  const cacheKey = new Request(url.toString(), { method: "GET" });
+  const cache = caches.default;
+  if (!force) {
+    const hit = await cache.match(cacheKey);
+    if (hit) return hit;
+  }
+  try {
+    const records = await fetchTableRecords(PIPELINE_BASE_ID, PRIORITY_SIGNALS_TBL, env.AIRTABLE_PAT);
+    const signals = records.map(projectSignal).sort((a, b) => {
+      const da = a.date ? new Date(a.date).getTime() : 0;
+      const db = b.date ? new Date(b.date).getTime() : 0;
+      return db - da;
+    });
+    const payload = {
+      generatedAt: new Date().toISOString(),
+      count: signals.length,
+      signals,
+    };
+    const response = new Response(JSON.stringify(payload), {
+      headers: {
+        "Content-Type": "application/json",
+        "Cache-Control": "public, max-age=60",
+        "Access-Control-Allow-Origin": "*",
+      },
+    });
+    await cache.put(cacheKey, response.clone());
+    return response;
+  } catch (e) {
+    return new Response(JSON.stringify({ error: String(e.message || e) }),
+      { status: 502, headers: { "Content-Type": "application/json" } });
+  }
+}
+
+// POST /priority-signals/api/review  { id, reviewed }
+// Lets the dashboard tick a signal off as reviewed/handled without leaving the page.
+async function handleMarkSignalReviewed(request, env) {
+  if (!env.AIRTABLE_PAT) {
+    return new Response(JSON.stringify({ error: "AIRTABLE_PAT not set" }),
+      { status: 500, headers: { "Content-Type": "application/json" } });
+  }
+  if (request.method !== "POST") {
+    return new Response(JSON.stringify({ error: "POST only" }),
+      { status: 405, headers: { "Content-Type": "application/json" } });
+  }
+  try {
+    const body = await request.json();
+    const id = body && body.id;
+    if (!id) {
+      return new Response(JSON.stringify({ error: "missing id" }),
+        { status: 400, headers: { "Content-Type": "application/json" } });
+    }
+    const res = await fetch(`https://api.airtable.com/v0/${PIPELINE_BASE_ID}/${PRIORITY_SIGNALS_TBL}`, {
+      method: "PATCH",
+      headers: {
+        Authorization: `Bearer ${env.AIRTABLE_PAT}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ records: [{ id, fields: { "Reviewed": !!body.reviewed } }] }),
+    });
+    if (!res.ok) {
+      const text = await res.text();
+      return new Response(JSON.stringify({ error: `Airtable ${res.status}: ${text.slice(0, 200)}` }),
+        { status: 502, headers: { "Content-Type": "application/json" } });
+    }
+    return new Response(JSON.stringify({ ok: true }),
+      { headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" } });
+  } catch (e) {
+    return new Response(JSON.stringify({ error: String(e.message || e) }),
+      { status: 502, headers: { "Content-Type": "application/json" } });
+  }
+}
+
 function projectConcept(r) {
   const f = r.fields;
   const status = f["Approval Status"] || f["Status"] || null;
@@ -1280,6 +1382,8 @@ const PIPELINE_HTML = `<!doctype html>
       </div>
       <div class="crumb" id="crumb">
         <a onclick="goHome()">Home</a>
+        <span class="sep">·</span>
+        <a href="/priority-signals">Priority Signals</a>
       </div>
     </div>
     <div class="topbar-right">
@@ -2732,6 +2836,246 @@ loadData();
 </html>
 `;
 
+const PRIORITY_SIGNALS_HTML = `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>TAS Digital — Priority Signals</title>
+<style>
+  :root {
+    color-scheme: light;
+    --brand-blue: #2821B5;
+    --brand-blue-light: #E1E0F9;
+    --brand-blue-dark: #181839;
+    --brand-purple: #8321C8;
+    --brand-purple-light: #F0E1FA;
+    --brand-rose: #A63446;
+    --brand-rose-light: #F6E3E6;
+    --ink: #06060E;
+    --ink-soft: #4A5263;
+    --ink-faint: #8F8F8F;
+    --line: #E3E3E3;
+    --line-soft: #F1F1F1;
+    --bg: #FAFAFA;
+    --card: #FFFFFF;
+    --shadow: 0 1px 3px rgba(6,6,14,.04), 0 4px 16px rgba(6,6,14,.05);
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; background: var(--bg); color: var(--ink);
+    font-family: -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", system-ui, sans-serif;
+    font-size: 14px; line-height: 1.55; }
+  .wrap { max-width: 980px; margin: 0 auto; padding: 28px 24px 60px; }
+  nav.topbar { display: flex; align-items: center; justify-content: space-between;
+    margin-bottom: 28px; padding-bottom: 16px; border-bottom: 1px solid var(--line); }
+  .brand-mark { display: flex; align-items: center; gap: 10px; text-decoration: none; }
+  .brand-mark .logo { height: 30px; width: auto; display: block; flex-shrink: 0; pointer-events: none; }
+  .brand-mark .label { font-size: 11px; font-weight: 600; letter-spacing: .14em;
+    text-transform: uppercase; color: var(--brand-blue); }
+  .crumb { display: flex; gap: 8px; align-items: center; color: var(--ink-soft); font-size: 13px; margin-top: 4px; }
+  .crumb a { color: var(--brand-blue); text-decoration: none; font-weight: 500; cursor: pointer; }
+  .crumb a:hover { text-decoration: underline; }
+  .crumb .sep { color: var(--ink-faint); }
+  .topbar-right { display: flex; gap: 10px; align-items: center; }
+  .topbar-right .ts { font-size: 11px; color: var(--ink-faint); font-variant-numeric: tabular-nums; }
+  button.refresh { background: var(--brand-blue); color: white; border: none;
+    padding: 8px 14px; border-radius: 8px; font-size: 12px; font-weight: 600;
+    cursor: pointer; transition: all .15s ease; letter-spacing: .02em; }
+  button.refresh:hover { background: var(--brand-blue-dark); }
+  button.refresh:disabled { opacity: 0.5; cursor: wait; }
+  h1 { font-size: 24px; font-weight: 700; margin: 0 0 4px; letter-spacing: -.02em; }
+  .sub { color: var(--ink-soft); font-size: 13px; margin-bottom: 22px; }
+
+  .filters { display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 20px; }
+  .filters select, .filters input[type="text"] {
+    border: 1px solid var(--line); border-radius: 8px; padding: 7px 10px; font-size: 13px;
+    background: var(--card); color: var(--ink); font-family: inherit;
+  }
+  .filters input[type="text"] { flex: 1; min-width: 160px; }
+  label.chk { display: flex; align-items: center; gap: 6px; font-size: 13px; color: var(--ink-soft); }
+
+  .signal-card { background: var(--card); border: 1px solid var(--line); border-radius: 12px;
+    padding: 16px 18px; margin-bottom: 12px; box-shadow: var(--shadow); position: relative; }
+  .signal-card.is-reviewed { opacity: 0.55; }
+  .signal-top { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; margin-bottom: 8px; }
+  .signal-summary { font-size: 14.5px; font-weight: 600; color: var(--ink); margin: 0; flex: 1; }
+  .badges { display: flex; gap: 6px; flex-shrink: 0; flex-wrap: wrap; justify-content: flex-end; }
+  .badge { font-size: 10.5px; font-weight: 700; text-transform: uppercase; letter-spacing: .04em;
+    padding: 3px 8px; border-radius: 6px; white-space: nowrap; }
+  .badge-Prioritization-Request { background: #FCE9D9; color: #A85D1B; }
+  .badge-Creative-Issue { background: var(--brand-rose-light); color: var(--brand-rose); }
+  .badge-PM-Note { background: var(--line-soft); color: var(--ink-soft); }
+  .badge-source { background: var(--brand-blue-light); color: var(--brand-blue); }
+  .signal-meta { display: flex; flex-wrap: wrap; gap: 4px 14px; font-size: 12px; color: var(--ink-soft); margin-bottom: 8px; }
+  .signal-meta b { color: var(--ink); font-weight: 600; }
+  .signal-quote { font-size: 12.5px; color: var(--ink-soft); font-style: italic; border-left: 2px solid var(--line);
+    padding-left: 10px; margin: 8px 0; }
+  .signal-bottom { display: flex; justify-content: space-between; align-items: center; margin-top: 8px; }
+  .signal-bottom a { font-size: 12px; color: var(--brand-blue); text-decoration: none; font-weight: 500; }
+  .signal-bottom a:hover { text-decoration: underline; }
+  .review-toggle { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--ink-soft); cursor: pointer; }
+
+  .empty, .loading { text-align: center; color: var(--ink-faint); padding: 60px 20px; font-size: 13px; }
+  .count-line { font-size: 12px; color: var(--ink-faint); margin-bottom: 14px; }
+  footer { margin-top: 32px; padding-top: 16px; border-top: 1px solid var(--line);
+    color: var(--ink-faint); font-size: 11px; text-align: center; text-transform: uppercase; letter-spacing: .08em; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <nav class="topbar">
+    <div>
+      <div class="brand-mark">
+        <svg class="logo" viewBox="0 0 470 100" xmlns="http://www.w3.org/2000/svg" aria-label="TAS Digital" role="img">
+          <defs>
+            <linearGradient id="tasG" x1="0" y1="0" x2="1" y2="1">
+              <stop offset="0%" stop-color="#2821B5"/>
+              <stop offset="100%" stop-color="#8321C8"/>
+            </linearGradient>
+          </defs>
+          <g fill="none" stroke="url(#tasG)">
+            <circle cx="50" cy="50" r="44" stroke-width="6"/>
+            <circle cx="50" cy="50" r="30" stroke-width="5"/>
+            <ellipse cx="50" cy="50" rx="12" ry="18" stroke-width="4"/>
+          </g>
+          <text x="120" y="65" font-family="-apple-system,BlinkMacSystemFont,'Inter','Segoe UI',system-ui,sans-serif" font-size="42" font-weight="300" letter-spacing="6" fill="url(#tasG)">TAS DIGITAL</text>
+        </svg>
+        <span class="label">· Priority Signals</span>
+      </div>
+      <div class="crumb">
+        <a href="/">Home</a>
+        <span class="sep">·</span>
+        <a href="/">Creative Pipeline</a>
+      </div>
+    </div>
+    <div class="topbar-right">
+      <span class="ts" id="ts">Loading…</span>
+      <button class="refresh" id="refresh-btn" onclick="loadData(true)">↻ Refresh</button>
+    </div>
+  </nav>
+
+  <h1>Priority Signals</h1>
+  <div class="sub">Daily-scanned prioritization requests, creative issues, and PM notes pulled from Slack + Fathom meetings — so CSMs can see when a competing priority got set and push back if needed.</div>
+
+  <div class="filters">
+    <input type="text" id="search" placeholder="Search client, summary, or person…" oninput="render()" />
+    <select id="filterType" onchange="render()">
+      <option value="">All types</option>
+      <option value="Prioritization Request">Prioritization Request</option>
+      <option value="Creative Issue">Creative Issue</option>
+      <option value="PM Note">PM Note</option>
+    </select>
+    <select id="filterSource" onchange="render()">
+      <option value="">All sources</option>
+      <option value="Fathom">Fathom</option>
+      <option value="Slack">Slack</option>
+    </select>
+    <label class="chk"><input type="checkbox" id="hideReviewed" checked onchange="render()" /> Hide reviewed</label>
+  </div>
+
+  <div id="root"><div class="loading">Loading…</div></div>
+
+  <footer>Populated daily by n8n from Fathom (admin) + Slack · Tick "Reviewed" once handled</footer>
+</div>
+<script>
+let ALL = [];
+
+async function loadData(force) {
+  const btn = document.getElementById('refresh-btn');
+  btn.disabled = true;
+  btn.textContent = '↻ Loading…';
+  try {
+    const res = await fetch('/priority-signals/api' + (force ? '?refresh=1' : ''));
+    const data = await res.json();
+    if (data.error) throw new Error(data.error);
+    ALL = data.signals || [];
+    document.getElementById('ts').textContent = 'Updated ' + new Date(data.generatedAt).toLocaleString();
+    render();
+  } catch (e) {
+    document.getElementById('root').innerHTML = '<div class="empty">Failed to load: ' + (e.message || e) + '</div>';
+  } finally {
+    btn.disabled = false;
+    btn.textContent = '↻ Refresh';
+  }
+}
+
+function badgeClass(type) {
+  return 'badge badge-' + String(type || '').replace(/[^A-Za-z]/g, '-');
+}
+
+function render() {
+  const q = (document.getElementById('search').value || '').toLowerCase().trim();
+  const typeFilter = document.getElementById('filterType').value;
+  const sourceFilter = document.getElementById('filterSource').value;
+  const hideReviewed = document.getElementById('hideReviewed').checked;
+
+  let rows = ALL.filter(s => {
+    if (hideReviewed && s.reviewed) return false;
+    if (typeFilter && s.signalType !== typeFilter) return false;
+    if (sourceFilter && s.source !== sourceFilter) return false;
+    if (q) {
+      const hay = [s.summary, s.client, s.whoSaidIt, s.regarding, s.quote].filter(Boolean).join(' ').toLowerCase();
+      if (!hay.includes(q)) return false;
+    }
+    return true;
+  });
+
+  const root = document.getElementById('root');
+  if (rows.length === 0) {
+    root.innerHTML = '<div class="empty">No signals match these filters.</div>';
+    return;
+  }
+
+  root.innerHTML = '<div class="count-line">' + rows.length + ' of ' + ALL.length + ' signals</div>' +
+    rows.map(s => {
+      const dateStr = s.date ? new Date(s.date + 'T00:00:00').toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' }) : '';
+      return '<div class="signal-card' + (s.reviewed ? ' is-reviewed' : '') + '" data-id="' + s.id + '">' +
+        '<div class="signal-top">' +
+          '<p class="signal-summary">' + esc(s.summary) + '</p>' +
+          '<div class="badges">' +
+            '<span class="badge ' + badgeClass(s.signalType) + '">' + esc(s.signalType || '') + '</span>' +
+            '<span class="badge badge-source">' + esc(s.source || '') + '</span>' +
+          '</div>' +
+        '</div>' +
+        '<div class="signal-meta">' +
+          (s.client ? '<span><b>' + esc(s.client) + '</b></span>' : '') +
+          (s.whoSaidIt ? '<span>' + esc(s.whoSaidIt) + (s.regarding ? ' → ' + esc(s.regarding) : '') + '</span>' : '') +
+          (dateStr ? '<span>' + dateStr + '</span>' : '') +
+        '</div>' +
+        (s.quote ? '<div class="signal-quote">"' + esc(s.quote) + '"</div>' : '') +
+        '<div class="signal-bottom">' +
+          (s.sourceLink ? '<a href="' + esc(s.sourceLink) + '" target="_blank" rel="noopener">Open source ↗</a>' : '<span></span>') +
+          '<label class="review-toggle"><input type="checkbox" ' + (s.reviewed ? 'checked' : '') + ' onchange="toggleReviewed(\\'' + s.id + '\\', this.checked)" /> Reviewed</label>' +
+        '</div>' +
+      '</div>';
+    }).join('');
+}
+
+async function toggleReviewed(id, reviewed) {
+  const item = ALL.find(s => s.id === id);
+  if (item) item.reviewed = reviewed;
+  render();
+  try {
+    await fetch('/priority-signals/api/review', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id, reviewed }),
+    });
+  } catch (e) {
+    console.error('Failed to save reviewed state', e);
+  }
+}
+
+function esc(str) {
+  return String(str || '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+
+loadData(false);
+</script>
+</body>
+</html>
+`;
+
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
@@ -2752,6 +3096,20 @@ export default {
     }
     if (url.pathname === "/api/launch-digest") {
       return handleLaunchDigest(request, env);
+    }
+    if (url.pathname === "/priority-signals/api") {
+      return handlePrioritySignals(request, env);
+    }
+    if (url.pathname === "/priority-signals/api/review") {
+      return handleMarkSignalReviewed(request, env);
+    }
+    if (url.pathname === "/priority-signals") {
+      return new Response(PRIORITY_SIGNALS_HTML, {
+        headers: {
+          "Content-Type": "text/html; charset=utf-8",
+          "Cache-Control": "public, max-age=300",
+        },
+      });
     }
     // On the dedicated pipeline domain (pipeline.tas-digital.ai), the pipeline
     // IS the homepage — no /pipeline path needed. API calls above still use
