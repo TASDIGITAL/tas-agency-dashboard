@@ -1045,6 +1045,8 @@ const PIPELINE_HTML = `<!doctype html>
   .crumb .sep { color: var(--ink-faint); }
   .topbar-right { display: flex; gap: 10px; align-items: center; }
   .topbar-right .ts { font-size: 11px; color: var(--ink-faint); font-variant-numeric: tabular-nums; }
+  .side-link { font-size: 12px; font-weight: 600; color: var(--brand-blue); text-decoration: none; }
+  .side-link:hover { text-decoration: underline; }
   button.refresh {
     background: var(--brand-blue); color: white; border: none;
     padding: 8px 14px; border-radius: 8px; font-size: 12px; font-weight: 600;
@@ -1405,11 +1407,10 @@ const PIPELINE_HTML = `<!doctype html>
       </div>
       <div class="crumb" id="crumb">
         <a onclick="goHome()">Home</a>
-        <span class="sep">·</span>
-        <a href="/priority-signals">Priority Signals</a>
       </div>
     </div>
     <div class="topbar-right">
+      <a class="side-link" href="/priority-signals">Priority Signals</a>
       <span class="ts" id="ts">Loading…</span>
       <button class="refresh" id="refresh-btn" onclick="loadData(true)">↻ Refresh</button>
     </div>
