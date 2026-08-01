@@ -892,9 +892,32 @@ async function handlePipeline(request, env) {
 
 // === Launch Digest: simplified "Ads to Launch" summary for a Growth Strategist ===
 // GET /api/launch-digest?person=indransh
-// Reuses the exact same client-matching (personMatches) and Ads-to-Launch filtering
+// Reuses the exact same client-matching logic and Ads-to-Launch filtering
 // (isAdToLaunch / fetchPendingItemsForClient) as the pipeline dashboard, so counts here
 // always agree with what the dashboard shows that person. Built for the daily n8n → Slack digest.
+//
+// NOTE: the dashboard's PEOPLE array + personMatches() live inside PIPELINE_HTML's client-side
+// <script> (browser-only), not in this server scope, so they're duplicated here in minimal form
+// for the growth-strategist role only. Keep in sync with PIPELINE_HTML's PEOPLE if that changes.
+const GROWTH_STRATEGISTS = [
+  { slug: "indransh", display: "Indransh", group: "growth_strategist", field: "mediaBuyers", match: ["indransh"] },
+  { slug: "lucas",    display: "Lucas",    group: "growth_strategist", field: "mediaBuyers", match: ["lucas"] },
+];
+
+function growthStrategistMatches(client, personDef) {
+  const value = client[personDef.field];
+  if (!value) return false;
+  const candidates = Array.isArray(value) ? value : [value];
+  const nameMatches = candidates.some((name) =>
+    personDef.match.some((m) => String(name).toLowerCase().includes(m))
+  );
+  if (!nameMatches) return false;
+  // Growth Strategist: only match clients where we're doing creatives
+  const csList = client.creativeStrategists || [];
+  if (csList.length === 0) return false;
+  return true;
+}
+
 function classifyItemFormat(item) {
   const t = String(item.type || "").toLowerCase().trim();
   if (t.includes("video")) return "video";
@@ -909,7 +932,7 @@ async function handleLaunchDigest(request, env) {
   }
   const url = new URL(request.url);
   const personSlug = (url.searchParams.get("person") || "").toLowerCase().trim();
-  const personDef = PEOPLE.find((p) => p.group === "growth_strategist" && p.slug === personSlug);
+  const personDef = GROWTH_STRATEGISTS.find((p) => p.slug === personSlug);
   if (!personDef) {
     return new Response(JSON.stringify({ error: "missing/unknown ?person= (e.g. ?person=indransh)" }),
       { status: 400, headers: { "Content-Type": "application/json" } });
@@ -923,7 +946,7 @@ async function handleLaunchDigest(request, env) {
   }
   try {
     const { clients } = await fetchActiveClientsWithBase(env);
-    const matching = clients.filter((c) => personMatches(c, personDef));
+    const matching = clients.filter((c) => growthStrategistMatches(c, personDef));
     const results = await Promise.all(matching.map((c) => fetchPendingItemsForClient(c, env.AIRTABLE_PAT)));
 
     const clientSummaries = [];
