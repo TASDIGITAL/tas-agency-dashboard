@@ -336,7 +336,7 @@ const BASE_STRUCTURES = {
   "apph5ye18T3GP1JPX": { structure: "older", tableIds: ["tbltzKSl3uN415bJq", "tblShFdXDUAyQh1CN"] }, // Fixd (M)
   "apprNKez5QYeVy4J7": { structure: "older", tableIds: ["tbltzKSl3uN415bJq", "tblShFdXDUAyQh1CN"] }, // Fixd (LF)
   "appgn2YTL9VT3IAck": { structure: "older", tableIds: ["tblhU5yVNhVDwykUt", "tblGC0TxnHI7lKaNQ"] }, // QGS
-  "appiNNpOvxcRfbZDw": { structure: "older", tableIds: ["tblobLm7FAMCkQMhD", "tblNTGHJf0z692Ca0"] }, // Comfylabs
+  "appiNNpOvxcRfbZDw": { structure: "newer", tableIds: ["tblhU5yVNhVDwykUt"] }, // Comfylabs — base was migrated to the unified Creative Sheet (Internal & Interface) table; old split tables no longer exist, causing this client to silently return 0 items
   "app6YjwC8LdIMquAl": { structure: "older", tableIds: ["tblhU5yVNhVDwykUt", "tblGC0TxnHI7lKaNQ"] }, // Cabin K9
 };
 
