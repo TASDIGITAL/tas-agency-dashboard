@@ -306,6 +306,50 @@ async function fetchActiveClientsWithBase(env) {
   return { clients: expanded, teamMap };
 }
 
+// Full active-client roster (no Creative Base ID requirement) — used by the
+// /active-clients coverage page so a client missing its base link (the Santa Mood
+// bug: Active=true but Creative Base ID empty) shows up as a flagged gap instead
+// of silently disappearing from every other endpoint.
+const PIPELINE_ROSTER_FIELDS = [...PIPELINE_CLIENT_FIELDS, "fld92vjpDt9h9WFLh"]; // + On Hold / Closing
+
+async function fetchAllActiveClientsRoster(env) {
+  const [teamMap, records] = await Promise.all([
+    fetchTeamMap(env.AIRTABLE_PAT),
+    fetchAllRecords(PIPELINE_BASE_ID, PIPELINE_CLIENTS_TBL, PIPELINE_ROSTER_FIELDS, env.AIRTABLE_PAT,
+      "{Active}=TRUE()"),
+  ]);
+  return records.map((r) => {
+    const f = r.fields;
+    const resolveOne = (entry) => {
+      if (typeof entry === "string") {
+        const t = teamMap[entry];
+        return t ? (t.name || entry) : entry;
+      }
+      if (entry && entry.name) return entry.name;
+      return null;
+    };
+    const resolveAll = (linkArr) => {
+      if (!Array.isArray(linkArr)) return [];
+      return linkArr.map(resolveOne).filter(Boolean);
+    };
+    const csList = [
+      ...resolveAll(f.flddzaoCDc8h6axdz),
+      ...resolveAll(f.fldIeq1h6b2LOS9yj),
+    ].filter((name, i, arr) => arr.indexOf(name) === i);
+    const mediaBuyers = [
+      ...resolveAll(f.fldnEGrKUWFEIA8Gy),
+      ...resolveAll(f.fldMirANV1q7bPNia),
+    ].filter((name, i, arr) => arr.indexOf(name) === i);
+    return {
+      brand: f.fldkinqnN4Kx4xqDR || "(unnamed)",
+      baseId: f.fldfbAz1wkEqAbs0h || null,
+      onHold: !!f.fld92vjpDt9h9WFLh,
+      creativeStrategists: csList,
+      mediaBuyers: mediaBuyers,
+    };
+  });
+}
+
 // Hardcoded structures (one-time discovery via list_tables_for_base) — eliminates
 // per-request /meta calls so we stay under Cloudflare's 50 subrequests/invocation limit.
 // "newer" = unified "Creative Sheet (Internal & Interface)" table with Internal + Client Status
@@ -525,6 +569,80 @@ async function handleMarkSignalReviewed(request, env) {
     }
     return new Response(JSON.stringify({ ok: true }),
       { headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" } });
+  } catch (e) {
+    return new Response(JSON.stringify({ error: String(e.message || e) }),
+      { status: 502, headers: { "Content-Type": "application/json" } });
+  }
+}
+
+// GET /active-clients/api — full active-client roster cross-checked against the
+// creative pipeline: which clients have a Creative Base ID linked, whether their
+// base actually resolves (structure detection succeeds), and live pending-item
+// counts. Split into Creative + Ads vs Creative Only based on whether a media
+// buyer (Social Media CM / Google CM) is assigned. Flags clients with a team
+// assigned but no linked base — the same gap that hid Santa Mood from every
+// other page on this dashboard.
+async function handleActiveClients(request, env) {
+  if (!env.AIRTABLE_PAT) {
+    return new Response(JSON.stringify({ error: "AIRTABLE_PAT not set" }),
+      { status: 500, headers: { "Content-Type": "application/json" } });
+  }
+  const url = new URL(request.url);
+  const force = url.searchParams.get("refresh") === "1";
+  const cacheKey = new Request(url.toString(), { method: "GET" });
+  const cache = caches.default;
+  if (!force) {
+    const hit = await cache.match(cacheKey);
+    if (hit) return hit;
+  }
+  try {
+    const roster = await fetchAllActiveClientsRoster(env);
+    const withBase = roster.filter((c) => c.baseId);
+    const liveResults = await Promise.all(
+      withBase.map((c) => fetchPendingItemsForClient(c, env.AIRTABLE_PAT))
+    );
+    const liveByBrand = {};
+    liveResults.forEach((r) => { liveByBrand[r.brand] = r; });
+
+    const clients = roster.map((c) => {
+      const adsManaged = Array.isArray(c.mediaBuyers) && c.mediaBuyers.length > 0;
+      const hasTeam = adsManaged || (Array.isArray(c.creativeStrategists) && c.creativeStrategists.length > 0);
+      const live = c.baseId ? liveByBrand[c.brand] : null;
+      return {
+        brand: c.brand,
+        baseId: c.baseId,
+        hasBase: !!c.baseId,
+        onHold: c.onHold,
+        adsManaged,
+        creativeStrategists: c.creativeStrategists || [],
+        mediaBuyers: c.mediaBuyers || [],
+        pendingCount: live && !live.error ? live.items.length : null,
+        adsToLaunchCount: live && !live.error ? (live.adsToLaunch || []).length : null,
+        error: c.baseId ? (live ? live.error || null : null) : "No Creative Base ID linked",
+        needsAttention: !c.baseId && hasTeam,
+      };
+    });
+
+    clients.sort((a, b) => {
+      if (a.needsAttention !== b.needsAttention) return a.needsAttention ? -1 : 1;
+      return a.brand.localeCompare(b.brand);
+    });
+
+    const payload = {
+      generatedAt: new Date().toISOString(),
+      total: clients.length,
+      needsAttentionCount: clients.filter((c) => c.needsAttention).length,
+      clients,
+    };
+    const response = new Response(JSON.stringify(payload), {
+      headers: {
+        "Content-Type": "application/json",
+        "Cache-Control": "public, max-age=60",
+        "Access-Control-Allow-Origin": "*",
+      },
+    });
+    await cache.put(cacheKey, response.clone());
+    return response;
   } catch (e) {
     return new Response(JSON.stringify({ error: String(e.message || e) }),
       { status: 502, headers: { "Content-Type": "application/json" } });
@@ -1411,6 +1529,7 @@ const PIPELINE_HTML = `<!doctype html>
       </div>
     </div>
     <div class="topbar-right">
+      <a class="side-link" href="/active-clients">Active Clients</a>
       <a class="side-link" href="/priority-signals">Priority Signals</a>
       <span class="ts" id="ts">Loading…</span>
       <button class="refresh" id="refresh-btn" onclick="loadData(true)">↻ Refresh</button>
@@ -2903,6 +3022,8 @@ const PRIORITY_SIGNALS_HTML = `<!doctype html>
   .crumb .sep { color: var(--ink-faint); }
   .topbar-right { display: flex; gap: 10px; align-items: center; }
   .topbar-right .ts { font-size: 11px; color: var(--ink-faint); font-variant-numeric: tabular-nums; }
+  .side-link { font-size: 12px; font-weight: 600; color: var(--brand-blue); text-decoration: none; }
+  .side-link:hover { text-decoration: underline; }
   button.refresh { background: var(--brand-blue); color: white; border: none;
     padding: 8px 14px; border-radius: 8px; font-size: 12px; font-weight: 600;
     cursor: pointer; transition: all .15s ease; letter-spacing: .02em; }
@@ -2974,6 +3095,7 @@ const PRIORITY_SIGNALS_HTML = `<!doctype html>
       </div>
     </div>
     <div class="topbar-right">
+      <a class="side-link" href="/active-clients">Active Clients</a>
       <span class="ts" id="ts">Loading…</span>
       <button class="refresh" id="refresh-btn" onclick="loadData(true)">↻ Refresh</button>
     </div>
@@ -3101,6 +3223,248 @@ loadData(false);
 </html>
 `;
 
+const ACTIVE_CLIENTS_HTML = `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>TAS Digital — Active Clients</title>
+<style>
+  :root {
+    color-scheme: light;
+    --brand-blue: #2821B5;
+    --brand-blue-light: #E1E0F9;
+    --brand-blue-dark: #181839;
+    --brand-purple: #8321C8;
+    --brand-purple-light: #F0E1FA;
+    --brand-rose: #A63446;
+    --brand-rose-light: #F6E3E6;
+    --ink: #06060E;
+    --ink-soft: #4A5263;
+    --ink-faint: #8F8F8F;
+    --line: #E3E3E3;
+    --line-soft: #F1F1F1;
+    --bg: #FAFAFA;
+    --card: #FFFFFF;
+    --shadow: 0 1px 3px rgba(6,6,14,.04), 0 4px 16px rgba(6,6,14,.05);
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; background: var(--bg); color: var(--ink);
+    font-family: -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", system-ui, sans-serif;
+    font-size: 14px; line-height: 1.55; }
+  .wrap { max-width: 1080px; margin: 0 auto; padding: 28px 24px 60px; }
+  nav.topbar { display: flex; align-items: center; justify-content: space-between;
+    margin-bottom: 28px; padding-bottom: 16px; border-bottom: 1px solid var(--line); }
+  .brand-mark { display: flex; align-items: center; gap: 10px; text-decoration: none; }
+  .brand-mark .logo { height: 30px; width: auto; display: block; flex-shrink: 0; pointer-events: none; }
+  .brand-mark .label { font-size: 11px; font-weight: 600; letter-spacing: .14em;
+    text-transform: uppercase; color: var(--brand-blue); }
+  .crumb { display: flex; gap: 8px; align-items: center; color: var(--ink-soft); font-size: 13px; margin-top: 4px; }
+  .crumb a { color: var(--brand-blue); text-decoration: none; font-weight: 500; cursor: pointer; }
+  .crumb a:hover { text-decoration: underline; }
+  .crumb .sep { color: var(--ink-faint); }
+  .topbar-right { display: flex; gap: 10px; align-items: center; }
+  .topbar-right .ts { font-size: 11px; color: var(--ink-faint); font-variant-numeric: tabular-nums; }
+  button.refresh { background: var(--brand-blue); color: white; border: none;
+    padding: 8px 14px; border-radius: 8px; font-size: 12px; font-weight: 600;
+    cursor: pointer; transition: all .15s ease; letter-spacing: .02em; }
+  button.refresh:hover { background: var(--brand-blue-dark); }
+  button.refresh:disabled { opacity: 0.5; cursor: wait; }
+  h1 { font-size: 24px; font-weight: 700; margin: 0 0 4px; letter-spacing: -.02em; }
+  .sub { color: var(--ink-soft); font-size: 13px; margin-bottom: 22px; }
+
+  .stats-row { display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 20px; }
+  .stat { background: var(--card); border: 1px solid var(--line); border-radius: 10px;
+    padding: 12px 16px; min-width: 120px; box-shadow: var(--shadow); }
+  .stat .num { font-size: 22px; font-weight: 700; color: var(--ink); }
+  .stat .lbl { font-size: 11px; color: var(--ink-faint); text-transform: uppercase; letter-spacing: .05em; margin-top: 2px; }
+  .stat.warn .num { color: var(--brand-rose); }
+
+  .attention-box { background: var(--brand-rose-light); border: 1px solid var(--brand-rose);
+    border-radius: 10px; padding: 14px 16px; margin-bottom: 24px; }
+  .attention-box h3 { margin: 0 0 8px; font-size: 13px; color: var(--brand-rose); font-weight: 700; }
+  .attention-box ul { margin: 0; padding-left: 18px; font-size: 13px; color: var(--ink); }
+  .attention-box li { margin-bottom: 3px; }
+
+  .filters { display: flex; gap: 10px; margin-bottom: 16px; }
+  .filters input[type="text"] { flex: 1; border: 1px solid var(--line); border-radius: 8px;
+    padding: 7px 10px; font-size: 13px; font-family: inherit; background: var(--card); color: var(--ink); }
+
+  .group-title { font-size: 15px; font-weight: 700; margin: 26px 0 10px; display: flex; align-items: baseline; gap: 8px; }
+  .group-count { font-size: 12px; color: var(--ink-faint); font-weight: 500; }
+
+  table.roster { width: 100%; border-collapse: collapse; background: var(--card);
+    border: 1px solid var(--line); border-radius: 10px; overflow: hidden; box-shadow: var(--shadow); }
+  table.roster th { text-align: left; font-size: 11px; text-transform: uppercase; letter-spacing: .04em;
+    color: var(--ink-faint); padding: 10px 12px; border-bottom: 1px solid var(--line); background: var(--line-soft); }
+  table.roster td { padding: 10px 12px; border-bottom: 1px solid var(--line-soft); font-size: 13px; vertical-align: middle; }
+  table.roster tr:last-child td { border-bottom: none; }
+  table.roster tr.is-attention { background: var(--brand-rose-light); }
+  .pill { display: inline-block; font-size: 11px; font-weight: 600; padding: 3px 8px; border-radius: 6px; white-space: nowrap; }
+  .pill-ok { background: #DFF3E3; color: #1E7A34; }
+  .pill-warn { background: var(--brand-rose-light); color: var(--brand-rose); }
+  .pill-hold { background: var(--line-soft); color: var(--ink-soft); margin-left: 6px; }
+  .pill-count { background: var(--brand-blue-light); color: var(--brand-blue); }
+  .muted { color: var(--ink-faint); }
+  .untracked-list { font-size: 13px; color: var(--ink-soft); line-height: 1.9; background: var(--card);
+    border: 1px solid var(--line); border-radius: 10px; padding: 12px 16px; }
+
+  .empty, .loading { text-align: center; color: var(--ink-faint); padding: 40px 20px; font-size: 13px; }
+  footer { margin-top: 32px; padding-top: 16px; border-top: 1px solid var(--line);
+    color: var(--ink-faint); font-size: 11px; text-align: center; text-transform: uppercase; letter-spacing: .08em; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <nav class="topbar">
+    <div>
+      <div class="brand-mark">
+        <svg class="logo" viewBox="0 0 470 100" xmlns="http://www.w3.org/2000/svg" aria-label="TAS Digital" role="img">
+          <defs>
+            <linearGradient id="tasG" x1="0" y1="0" x2="1" y2="1">
+              <stop offset="0%" stop-color="#2821B5"/>
+              <stop offset="100%" stop-color="#8321C8"/>
+            </linearGradient>
+          </defs>
+          <g fill="none" stroke="url(#tasG)">
+            <circle cx="50" cy="50" r="44" stroke-width="6"/>
+            <circle cx="50" cy="50" r="30" stroke-width="5"/>
+            <ellipse cx="50" cy="50" rx="12" ry="18" stroke-width="4"/>
+          </g>
+          <text x="120" y="65" font-family="-apple-system,BlinkMacSystemFont,'Inter','Segoe UI',system-ui,sans-serif" font-size="42" font-weight="300" letter-spacing="6" fill="url(#tasG)">TAS DIGITAL</text>
+        </svg>
+        <span class="label">· Active Clients</span>
+      </div>
+      <div class="crumb">
+        <a href="/">Home</a>
+        <span class="sep">·</span>
+        <a href="/priority-signals">Priority Signals</a>
+      </div>
+    </div>
+    <div class="topbar-right">
+      <span class="ts" id="ts">Loading…</span>
+      <button class="refresh" id="refresh-btn" onclick="loadData(true)">↻ Refresh</button>
+    </div>
+  </nav>
+
+  <h1>Active Clients</h1>
+  <div class="sub">Every client marked Active in Airtable, cross-checked live against the creative pipeline — so a client missing its base link (like Santa Mood was) gets caught immediately instead of silently disappearing.</div>
+
+  <div id="stats" class="stats-row"></div>
+  <div id="attention"></div>
+
+  <div class="filters">
+    <input type="text" id="search" placeholder="Search brand…" oninput="render()" />
+  </div>
+
+  <div id="root"><div class="loading">Loading…</div></div>
+
+  <footer>Live from the 👥 Clients table in Airtable · Base-link status + item counts pulled fresh from each client's own creative base</footer>
+</div>
+<script>
+let ALL = [];
+
+async function loadData(force) {
+  const btn = document.getElementById('refresh-btn');
+  btn.disabled = true;
+  btn.textContent = '↻ Loading…';
+  try {
+    const res = await fetch('/active-clients/api' + (force ? '?refresh=1' : ''));
+    const data = await res.json();
+    if (data.error) throw new Error(data.error);
+    ALL = data.clients || [];
+    document.getElementById('ts').textContent = 'Updated ' + new Date(data.generatedAt).toLocaleString();
+    renderStats(data);
+    render();
+  } catch (e) {
+    document.getElementById('root').innerHTML = '<div class="empty">Failed to load: ' + (e.message || e) + '</div>';
+  } finally {
+    btn.disabled = false;
+    btn.textContent = '↻ Refresh';
+  }
+}
+
+function stat(num, label, warn) {
+  return '<div class="stat' + (warn ? ' warn' : '') + '"><div class="num">' + num + '</div><div class="lbl">' + label + '</div></div>';
+}
+
+function renderStats(data) {
+  const adsCount = ALL.filter(c => c.adsManaged).length;
+  const creativeOnly = ALL.filter(c => !c.adsManaged && (c.creativeStrategists || []).length > 0).length;
+  const untracked = ALL.filter(c => !c.adsManaged && (c.creativeStrategists || []).length === 0).length;
+  document.getElementById('stats').innerHTML =
+    stat(data.total, 'Active Clients') +
+    stat(adsCount, 'Creative + Ads') +
+    stat(creativeOnly, 'Creative Only') +
+    stat(untracked, 'No Team Assigned') +
+    stat(data.needsAttentionCount, 'Needs Attention', data.needsAttentionCount > 0);
+
+  const attn = ALL.filter(c => c.needsAttention);
+  const box = document.getElementById('attention');
+  if (attn.length === 0) { box.innerHTML = ''; return; }
+  box.innerHTML = '<div class="attention-box"><h3>⚠️ ' + attn.length +
+    ' active client(s) have a Creative Strategist or media buyer assigned but no Creative Base ID linked — the same gap that hid Santa Mood from this dashboard</h3><ul>' +
+    attn.map(c => '<li><b>' + esc(c.brand) + '</b> — ' + [...(c.creativeStrategists || []), ...(c.mediaBuyers || [])].map(esc).join(', ') + '</li>').join('') +
+    '</ul></div>';
+}
+
+function baseStatusPill(c) {
+  if (!c.hasBase) return '<span class="pill pill-warn">⚠ Missing base</span>';
+  if (c.error) return '<span class="pill pill-warn" title="' + esc(c.error) + '">⚠ ' + esc(c.error) + '</span>';
+  return '<span class="pill pill-ok">✓ Linked</span>';
+}
+
+function render() {
+  const q = (document.getElementById('search').value || '').toLowerCase().trim();
+  let rows = ALL.filter(c => !q || c.brand.toLowerCase().includes(q));
+
+  const adsGroup = rows.filter(c => c.adsManaged);
+  const creativeGroup = rows.filter(c => !c.adsManaged && (c.creativeStrategists || []).length > 0);
+  const untrackedGroup = rows.filter(c => !c.adsManaged && (c.creativeStrategists || []).length === 0);
+
+  const root = document.getElementById('root');
+  if (rows.length === 0) { root.innerHTML = '<div class="empty">No clients match this search.</div>'; return; }
+
+  root.innerHTML =
+    section('🎯 Creative + Ads', adsGroup, true) +
+    section('🎨 Creative Only', creativeGroup, false) +
+    (untrackedGroup.length ? untrackedSection(untrackedGroup) : '');
+}
+
+function section(title, rows, showBuyers) {
+  if (rows.length === 0) return '';
+  return '<div class="group-title">' + title + '<span class="group-count">(' + rows.length + ')</span></div>' +
+    '<table class="roster"><thead><tr><th>Brand</th><th>Creative Strategist(s)</th>' +
+    (showBuyers ? '<th>Media Buyer(s)</th>' : '') +
+    '<th>Base Link</th><th>Pending Items</th>' +
+    (showBuyers ? '<th>Ads to Launch</th>' : '') +
+    '</tr></thead><tbody>' +
+    rows.map(c => '<tr class="' + (c.needsAttention ? 'is-attention' : '') + '">' +
+      '<td>' + esc(c.brand) + (c.onHold ? '<span class="pill pill-hold">On Hold</span>' : '') + '</td>' +
+      '<td>' + esc((c.creativeStrategists || []).join(', ') || '—') + '</td>' +
+      (showBuyers ? '<td>' + esc((c.mediaBuyers || []).join(', ') || '—') + '</td>' : '') +
+      '<td>' + baseStatusPill(c) + '</td>' +
+      '<td>' + (c.pendingCount != null ? '<span class="pill pill-count">' + c.pendingCount + '</span>' : '<span class="muted">—</span>') + '</td>' +
+      (showBuyers ? '<td>' + (c.adsToLaunchCount != null ? '<span class="pill pill-count">' + c.adsToLaunchCount + '</span>' : '<span class="muted">—</span>') + '</td>' : '') +
+    '</tr>').join('') +
+    '</tbody></table>';
+}
+
+function untrackedSection(rows) {
+  return '<div class="group-title">No Team Assigned <span class="group-count">(' + rows.length + ')</span></div>' +
+    '<div class="untracked-list">' + rows.map(c => esc(c.brand) + (c.onHold ? ' (On Hold)' : '')).join(' · ') + '</div>';
+}
+
+function esc(str) {
+  return String(str || '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+
+loadData(false);
+</script>
+</body>
+</html>
+`;
+
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
@@ -3130,6 +3494,17 @@ export default {
     }
     if (url.pathname === "/priority-signals") {
       return new Response(PRIORITY_SIGNALS_HTML, {
+        headers: {
+          "Content-Type": "text/html; charset=utf-8",
+          "Cache-Control": "public, max-age=300",
+        },
+      });
+    }
+    if (url.pathname === "/active-clients/api") {
+      return handleActiveClients(request, env);
+    }
+    if (url.pathname === "/active-clients") {
+      return new Response(ACTIVE_CLIENTS_HTML, {
         headers: {
           "Content-Type": "text/html; charset=utf-8",
           "Cache-Control": "public, max-age=300",
