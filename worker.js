@@ -382,7 +382,7 @@ const BASE_STRUCTURES = {
   "apprNKez5QYeVy4J7": { structure: "older", tableIds: ["tbltzKSl3uN415bJq", "tblShFdXDUAyQh1CN"] }, // Fixd (LF)
   "appgn2YTL9VT3IAck": { structure: "older", tableIds: ["tblobLm7FAMCkQMhD", "tblNTGHJf0z692Ca0"] }, // QGS — same stale-table-ID bug as Comfylabs; old IDs no longer exist in this base
   "appiNNpOvxcRfbZDw": { structure: "newer", tableIds: ["tblhU5yVNhVDwykUt"] }, // Comfylabs — base was migrated to the unified Creative Sheet (Internal & Interface) table; old split tables no longer exist, causing this client to silently return 0 items
-  "app6YjwC8LdIMquAl": { structure: "older", tableIds: ["tblhU5yVNhVDwykUt", "tblGC0TxnHI7lKaNQ"] }, // Cabin K9
+  "app6YjwC8LdIMquAl": { structure: "newer", tableIds: ["tblhU5yVNhVDwykUt"] }, // Cabin K9 — same stale-structure bug as Comfylabs/QGS: base has the unified table now, old "older" mapping caused Airtable API 422s (no Status field on the unified table)
 };
 
 // Detect base structure: hardcoded map first, fallback to live /meta call only if unknown.
