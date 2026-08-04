@@ -374,6 +374,9 @@ const BASE_STRUCTURES = {
   "applQdA4FOBWqEHcS": { structure: "newer", tableIds: ["tblhU5yVNhVDwykUt"] }, // Shadana Yoga
   "appVSXwwoYt0jF8xi": { structure: "newer", tableIds: ["tblhU5yVNhVDwykUt"] }, // Kiln Frog
   "appjimE8RAjvCc1gF": { structure: "newer", tableIds: ["tblhU5yVNhVDwykUt"] }, // Santa Mood — Creative Base ID was empty on the Clients record, excluding it from the active-clients query entirely; linked base found and structure verified 2026-08-03
+  "appWhSYilpyREuhaL": { structure: "newer", tableIds: ["tblhU5yVNhVDwykUt"] }, // Bellalab — same missing-Creative-Base-ID gap as Santa Mood, found + linked 2026-08-04
+  "appG4TkT8hvhv700X": { structure: "newer", tableIds: ["tblhU5yVNhVDwykUt"] }, // Pablo Quintanilla — same missing-Creative-Base-ID gap as Santa Mood, found + linked 2026-08-04
+  "appn1XCgInQ4Iqqrv": { structure: "newer", tableIds: ["tblhU5yVNhVDwykUt"] }, // Shiny Smile (Invisawear) — base is named "Shiny Smile Veneers" (website matches: shinysmileveneers.com), same missing-Creative-Base-ID gap, found + linked 2026-08-04
   // Older (split) — order: [internal, sheet]
   "appcjs5nWjghBiJp4": { structure: "older", tableIds: ["tblk7btBQK70SqVun", "tblJP6OdqaUuHCLnK"] }, // Ergonomist
   "appPhQV5SSIn4gqxe": { structure: "older", tableIds: ["tblhU5yVNhVDwykUt", "tblGC0TxnHI7lKaNQ"] }, // Le Pratique du Motard
