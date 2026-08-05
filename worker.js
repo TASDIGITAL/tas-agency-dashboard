@@ -520,6 +520,24 @@ function projectSignal(r) {
   };
 }
 
+// Shared with handleAssistant, which needs the raw data without the Response/
+// caching wrapper (calling handlePrioritySignals directly as an in-process function
+// call was unreliable — see handleAssistant for why self-fetch/in-process reuse
+// were both dropped in favor of this plain data function).
+async function computePrioritySignalsData(env) {
+  const records = await fetchTableRecords(PIPELINE_BASE_ID, PRIORITY_SIGNALS_TBL, env.AIRTABLE_PAT);
+  const signals = records.map(projectSignal).sort((a, b) => {
+    const da = a.date ? new Date(a.date).getTime() : 0;
+    const db = b.date ? new Date(b.date).getTime() : 0;
+    return db - da;
+  });
+  return {
+    generatedAt: new Date().toISOString(),
+    count: signals.length,
+    signals,
+  };
+}
+
 async function handlePrioritySignals(request, env) {
   if (!env.AIRTABLE_PAT) {
     return new Response(JSON.stringify({ error: "AIRTABLE_PAT not set" }),
@@ -534,17 +552,7 @@ async function handlePrioritySignals(request, env) {
     if (hit) return hit;
   }
   try {
-    const records = await fetchTableRecords(PIPELINE_BASE_ID, PRIORITY_SIGNALS_TBL, env.AIRTABLE_PAT);
-    const signals = records.map(projectSignal).sort((a, b) => {
-      const da = a.date ? new Date(a.date).getTime() : 0;
-      const db = b.date ? new Date(b.date).getTime() : 0;
-      return db - da;
-    });
-    const payload = {
-      generatedAt: new Date().toISOString(),
-      count: signals.length,
-      signals,
-    };
+    const payload = await computePrioritySignalsData(env);
     const response = new Response(JSON.stringify(payload), {
       headers: {
         "Content-Type": "application/json",
@@ -606,6 +614,54 @@ async function handleMarkSignalReviewed(request, env) {
 // buyer (Social Media CM / Google CM) is assigned. Flags clients with a team
 // assigned but no linked base — the same gap that hid Santa Mood from every
 // other page on this dashboard.
+// Shared with handleAssistant — see computePrioritySignalsData for why this is a
+// plain data function rather than reusing handleActiveClients directly.
+async function computeActiveClientsData(env) {
+  const roster = await fetchAllActiveClientsRoster(env);
+  const withBase = roster.filter((c) => c.baseId);
+  const liveResults = await Promise.all(
+    withBase.map((c) => fetchPendingItemsForClient(c, env.AIRTABLE_PAT))
+  );
+  const liveByBrand = {};
+  liveResults.forEach((r) => { liveByBrand[r.brand] = r; });
+
+  const clients = roster.map((c) => {
+    const adsManaged = Array.isArray(c.mediaBuyers) && c.mediaBuyers.length > 0;
+    const hasTeam = adsManaged || (Array.isArray(c.creativeStrategists) && c.creativeStrategists.length > 0);
+    const live = c.baseId ? liveByBrand[c.brand] : null;
+    return {
+      brand: c.brand,
+      baseId: c.baseId,
+      hasBase: !!c.baseId,
+      onHold: c.onHold,
+      adsManaged,
+      creativeStrategists: c.creativeStrategists || [],
+      mediaBuyers: c.mediaBuyers || [],
+      pendingCount: live && !live.error ? live.items.length : null,
+      adsToLaunchCount: live && !live.error ? (live.adsToLaunch || []).length : null,
+      error: c.baseId ? (live ? live.error || null : null) : "No Creative Base ID linked",
+      needsAttention: !c.baseId && hasTeam,
+    };
+  });
+
+  // Only show clients relevant to creative strategy or ads. A client with no media
+  // buyer and no Creative Strategist isn't tracked by this pipeline at all (e.g.
+  // email-marketing-only clients) — per Talal 2026-08-04, don't show them here.
+  const relevant = clients.filter((c) => c.adsManaged || c.creativeStrategists.length > 0);
+
+  relevant.sort((a, b) => {
+    if (a.needsAttention !== b.needsAttention) return a.needsAttention ? -1 : 1;
+    return a.brand.localeCompare(b.brand);
+  });
+
+  return {
+    generatedAt: new Date().toISOString(),
+    total: relevant.length,
+    needsAttentionCount: relevant.filter((c) => c.needsAttention).length,
+    clients: relevant,
+  };
+}
+
 async function handleActiveClients(request, env) {
   if (!env.AIRTABLE_PAT) {
     return new Response(JSON.stringify({ error: "AIRTABLE_PAT not set" }),
@@ -620,49 +676,7 @@ async function handleActiveClients(request, env) {
     if (hit) return hit;
   }
   try {
-    const roster = await fetchAllActiveClientsRoster(env);
-    const withBase = roster.filter((c) => c.baseId);
-    const liveResults = await Promise.all(
-      withBase.map((c) => fetchPendingItemsForClient(c, env.AIRTABLE_PAT))
-    );
-    const liveByBrand = {};
-    liveResults.forEach((r) => { liveByBrand[r.brand] = r; });
-
-    const clients = roster.map((c) => {
-      const adsManaged = Array.isArray(c.mediaBuyers) && c.mediaBuyers.length > 0;
-      const hasTeam = adsManaged || (Array.isArray(c.creativeStrategists) && c.creativeStrategists.length > 0);
-      const live = c.baseId ? liveByBrand[c.brand] : null;
-      return {
-        brand: c.brand,
-        baseId: c.baseId,
-        hasBase: !!c.baseId,
-        onHold: c.onHold,
-        adsManaged,
-        creativeStrategists: c.creativeStrategists || [],
-        mediaBuyers: c.mediaBuyers || [],
-        pendingCount: live && !live.error ? live.items.length : null,
-        adsToLaunchCount: live && !live.error ? (live.adsToLaunch || []).length : null,
-        error: c.baseId ? (live ? live.error || null : null) : "No Creative Base ID linked",
-        needsAttention: !c.baseId && hasTeam,
-      };
-    });
-
-    // Only show clients relevant to creative strategy or ads. A client with no media
-    // buyer and no Creative Strategist isn't tracked by this pipeline at all (e.g.
-    // email-marketing-only clients) — per Talal 2026-08-04, don't show them here.
-    const relevant = clients.filter((c) => c.adsManaged || c.creativeStrategists.length > 0);
-
-    relevant.sort((a, b) => {
-      if (a.needsAttention !== b.needsAttention) return a.needsAttention ? -1 : 1;
-      return a.brand.localeCompare(b.brand);
-    });
-
-    const payload = {
-      generatedAt: new Date().toISOString(),
-      total: relevant.length,
-      needsAttentionCount: relevant.filter((c) => c.needsAttention).length,
-      clients: relevant,
-    };
+    const payload = await computeActiveClientsData(env);
     const response = new Response(JSON.stringify(payload), {
       headers: {
         "Content-Type": "application/json",
@@ -704,13 +718,10 @@ async function handleAssistant(request, env) {
         { status: 400, headers: { "Content-Type": "application/json" } });
     }
 
-    const origin = new URL(request.url).origin;
-    const [acResp, psResp] = await Promise.all([
-      fetch(origin + "/active-clients/api"),
-      fetch(origin + "/priority-signals/api"),
+    const [acData, psData] = await Promise.all([
+      computeActiveClientsData(env),
+      computePrioritySignalsData(env),
     ]);
-    const acData = await acResp.json();
-    const psData = await psResp.json();
 
     const context = {
       generatedAt: new Date().toISOString(),
