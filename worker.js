@@ -378,6 +378,7 @@ const BASE_STRUCTURES = {
   "appG4TkT8hvhv700X": { structure: "newer", tableIds: ["tblhU5yVNhVDwykUt"] }, // Pablo Quintanilla — same missing-Creative-Base-ID gap as Santa Mood, found + linked 2026-08-04
   "appn1XCgInQ4Iqqrv": { structure: "newer", tableIds: ["tblhU5yVNhVDwykUt"] }, // Shiny Smile (Invisawear) — base is named "Shiny Smile Veneers" (website matches: shinysmileveneers.com), same missing-Creative-Base-ID gap, found + linked 2026-08-04
   "appHSy3UVlswU9Msi": { structure: "newer", tableIds: ["tblPGhr8PMjfbhYxB"] }, // TAS Digital Ads — TAS's own internal ads base (table is named "(Internal & External) Creative Design" but has the same Internal/Client Status fields); replaces the old link to the Social Media content-calendar base, which had no matching table structure, per Talal 2026-08-04
+  "appZDc1R13SjqNa1Y": { structure: "newer", tableIds: ["tblhU5yVNhVDwykUt"] }, // NuttyHero Inc. — same missing-Creative-Base-ID gap as Santa Mood/Bellalab, found + linked 2026-08-04
   // Older (split) — order: [internal, sheet]
   "appcjs5nWjghBiJp4": { structure: "older", tableIds: ["tblk7btBQK70SqVun", "tblJP6OdqaUuHCLnK"] }, // Ergonomist
   "appPhQV5SSIn4gqxe": { structure: "older", tableIds: ["tblhU5yVNhVDwykUt", "tblGC0TxnHI7lKaNQ"] }, // Le Pratique du Motard
