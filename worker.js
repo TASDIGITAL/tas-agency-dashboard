@@ -704,11 +704,10 @@ async function handleAssistant(request, env) {
         { status: 400, headers: { "Content-Type": "application/json" } });
     }
 
-    const acReq = new Request(new URL("/active-clients/api", request.url).toString(), { method: "GET" });
-    const psReq = new Request(new URL("/priority-signals/api", request.url).toString(), { method: "GET" });
+    const origin = new URL(request.url).origin;
     const [acResp, psResp] = await Promise.all([
-      handleActiveClients(acReq, env),
-      handlePrioritySignals(psReq, env),
+      fetch(origin + "/active-clients/api"),
+      fetch(origin + "/priority-signals/api"),
     ]);
     const acData = await acResp.json();
     const psData = await psResp.json();
@@ -746,11 +745,19 @@ async function handleAssistant(request, env) {
       },
     };
 
-    const n8nRes = await fetch(ASSISTANT_WEBHOOK_URL, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ question, history, context }),
-    });
+    const n8nController = new AbortController();
+    const n8nTimeout = setTimeout(() => n8nController.abort(), 45000);
+    let n8nRes;
+    try {
+      n8nRes = await fetch(ASSISTANT_WEBHOOK_URL, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ question, history, context }),
+        signal: n8nController.signal,
+      });
+    } finally {
+      clearTimeout(n8nTimeout);
+    }
     if (!n8nRes.ok) {
       const text = await n8nRes.text();
       return new Response(JSON.stringify({ error: "Assistant " + n8nRes.status + ": " + text.slice(0, 300) }),
