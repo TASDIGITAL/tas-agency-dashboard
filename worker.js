@@ -377,6 +377,7 @@ const BASE_STRUCTURES = {
   "appWhSYilpyREuhaL": { structure: "newer", tableIds: ["tblhU5yVNhVDwykUt"] }, // Bellalab — same missing-Creative-Base-ID gap as Santa Mood, found + linked 2026-08-04
   "appG4TkT8hvhv700X": { structure: "newer", tableIds: ["tblhU5yVNhVDwykUt"] }, // Pablo Quintanilla — same missing-Creative-Base-ID gap as Santa Mood, found + linked 2026-08-04
   "appn1XCgInQ4Iqqrv": { structure: "newer", tableIds: ["tblhU5yVNhVDwykUt"] }, // Shiny Smile (Invisawear) — base is named "Shiny Smile Veneers" (website matches: shinysmileveneers.com), same missing-Creative-Base-ID gap, found + linked 2026-08-04
+  "appHSy3UVlswU9Msi": { structure: "newer", tableIds: ["tblPGhr8PMjfbhYxB"] }, // TAS Digital Ads — TAS's own internal ads base (table is named "(Internal & External) Creative Design" but has the same Internal/Client Status fields); replaces the old link to the Social Media content-calendar base, which had no matching table structure, per Talal 2026-08-04
   // Older (split) — order: [internal, sheet]
   "appcjs5nWjghBiJp4": { structure: "older", tableIds: ["tblk7btBQK70SqVun", "tblJP6OdqaUuHCLnK"] }, // Ergonomist
   "appPhQV5SSIn4gqxe": { structure: "older", tableIds: ["tblhU5yVNhVDwykUt", "tblGC0TxnHI7lKaNQ"] }, // Le Pratique du Motard
@@ -408,6 +409,25 @@ async function detectBaseStructure(baseId, pat) {
     return { structure: "older", tableIds };
   }
   return null;
+}
+
+// Some clients don't have their own Airtable base — their creative lives inside another
+// client's base, tagged via the "(Internal) Product" linked-record field. Keyed by
+// baseId -> { brand: { mode: "include"|"exclude", match: substring to test against the
+// linked (Internal) Product record names } }. Kiln Academy shares Kiln Frog's base this
+// way (same website, same team) — per Talal 2026-08-04.
+const SHARED_BASE_PRODUCT_FILTERS = {
+  "appVSXwwoYt0jF8xi": {
+    "Kiln Academy": { mode: "include", match: "Kiln Academy" },
+    "Kiln Frog": { mode: "exclude", match: "Kiln Academy" },
+  },
+};
+
+function productFilterFormula(brand, baseId) {
+  const cfg = SHARED_BASE_PRODUCT_FILTERS[baseId] && SHARED_BASE_PRODUCT_FILTERS[baseId][brand];
+  if (!cfg) return null;
+  const cond = `FIND("${cfg.match}", ARRAYJOIN({(Internal) Product})) > 0`;
+  return cfg.mode === "exclude" ? `NOT(${cond})` : cond;
 }
 
 async function fetchTableRecords(baseId, tableId, pat, filterFormula = null) {
@@ -918,6 +938,10 @@ async function fetchPendingItemsForClient(client, pat) {
       let filterFormula = null;
       if (meta.structure === "newer") {
         filterFormula = "NOT(AND({Internal Status} = 'Launched', {Client Status} = 'Launched'))";
+        const productCond = productFilterFormula(client.brand, client.baseId);
+        if (productCond) {
+          filterFormula = `AND(${filterFormula}, ${productCond})`;
+        }
       } else {
         filterFormula = "AND({Status} != BLANK(), {Status} != 'Launched')";
       }
