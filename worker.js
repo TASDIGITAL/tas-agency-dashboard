@@ -647,16 +647,21 @@ async function handleActiveClients(request, env) {
       };
     });
 
-    clients.sort((a, b) => {
+    // Only show clients relevant to creative strategy or ads. A client with no media
+    // buyer and no Creative Strategist isn't tracked by this pipeline at all (e.g.
+    // email-marketing-only clients) — per Talal 2026-08-04, don't show them here.
+    const relevant = clients.filter((c) => c.adsManaged || c.creativeStrategists.length > 0);
+
+    relevant.sort((a, b) => {
       if (a.needsAttention !== b.needsAttention) return a.needsAttention ? -1 : 1;
       return a.brand.localeCompare(b.brand);
     });
 
     const payload = {
       generatedAt: new Date().toISOString(),
-      total: clients.length,
-      needsAttentionCount: clients.filter((c) => c.needsAttention).length,
-      clients,
+      total: relevant.length,
+      needsAttentionCount: relevant.filter((c) => c.needsAttention).length,
+      clients: relevant,
     };
     const response = new Response(JSON.stringify(payload), {
       headers: {
@@ -3419,12 +3424,10 @@ function stat(num, label, warn) {
 function renderStats(data) {
   const adsCount = ALL.filter(c => c.adsManaged).length;
   const creativeOnly = ALL.filter(c => !c.adsManaged && (c.creativeStrategists || []).length > 0).length;
-  const untracked = ALL.filter(c => !c.adsManaged && (c.creativeStrategists || []).length === 0).length;
   document.getElementById('stats').innerHTML =
     stat(data.total, 'Active Clients') +
     stat(adsCount, 'Creative + Ads') +
     stat(creativeOnly, 'Creative Only') +
-    stat(untracked, 'No Team Assigned') +
     stat(data.needsAttentionCount, 'Needs Attention', data.needsAttentionCount > 0);
 
   const attn = ALL.filter(c => c.needsAttention);
@@ -3448,15 +3451,13 @@ function render() {
 
   const adsGroup = rows.filter(c => c.adsManaged);
   const creativeGroup = rows.filter(c => !c.adsManaged && (c.creativeStrategists || []).length > 0);
-  const untrackedGroup = rows.filter(c => !c.adsManaged && (c.creativeStrategists || []).length === 0);
 
   const root = document.getElementById('root');
   if (rows.length === 0) { root.innerHTML = '<div class="empty">No clients match this search.</div>'; return; }
 
   root.innerHTML =
     section('🎯 Creative + Ads', adsGroup, true) +
-    section('🎨 Creative Only', creativeGroup, false) +
-    (untrackedGroup.length ? untrackedSection(untrackedGroup) : '');
+    section('🎨 Creative Only', creativeGroup, false);
 }
 
 function section(title, rows, showBuyers) {
@@ -3476,11 +3477,6 @@ function section(title, rows, showBuyers) {
       (showBuyers ? '<td>' + (c.adsToLaunchCount != null ? '<span class="pill pill-count">' + c.adsToLaunchCount + '</span>' : '<span class="muted">—</span>') + '</td>' : '') +
     '</tr>').join('') +
     '</tbody></table>';
-}
-
-function untrackedSection(rows) {
-  return '<div class="group-title">No Team Assigned <span class="group-count">(' + rows.length + ')</span></div>' +
-    '<div class="untracked-list">' + rows.map(c => esc(c.brand) + (c.onHold ? ' (On Hold)' : '')).join(' · ') + '</div>';
 }
 
 function esc(str) {
