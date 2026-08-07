@@ -520,10 +520,8 @@ function projectSignal(r) {
   };
 }
 
-// Shared with handleAssistant, which needs the raw data without the Response/
-// caching wrapper (calling handlePrioritySignals directly as an in-process function
-// call was unreliable — see handleAssistant for why self-fetch/in-process reuse
-// were both dropped in favor of this plain data function).
+// Plain data function (no Response/caching wrapper) so other handlers can
+// reuse this computation directly without going through the HTTP layer.
 async function computePrioritySignalsData(env) {
   const records = await fetchTableRecords(PIPELINE_BASE_ID, PRIORITY_SIGNALS_TBL, env.AIRTABLE_PAT);
   const signals = records.map(projectSignal).sort((a, b) => {
@@ -614,8 +612,8 @@ async function handleMarkSignalReviewed(request, env) {
 // buyer (Social Media CM / Google CM) is assigned. Flags clients with a team
 // assigned but no linked base — the same gap that hid Santa Mood from every
 // other page on this dashboard.
-// Shared with handleAssistant — see computePrioritySignalsData for why this is a
-// plain data function rather than reusing handleActiveClients directly.
+// Plain data function (no Response/caching wrapper), same pattern as
+// computePrioritySignalsData above.
 async function computeActiveClientsData(env) {
   const roster = await fetchAllActiveClientsRoster(env);
   const withBase = roster.filter((c) => c.baseId);
@@ -693,96 +691,6 @@ async function handleActiveClients(request, env) {
 }
 
 
-// n8n webhook (Claude, via the same Anthropic credential used for the daily
-// Priority Signals scan) that powers the "Ask Luna" chat widget on every page.
-const ASSISTANT_WEBHOOK_URL = "https://primary-production-1e83.up.railway.app/webhook/pipeline-assistant-chat";
-
-// POST /assistant/api  { question, history }
-// Gathers live context (active clients + priority signals, sharing the same cache
-// as their dedicated pages) and forwards it to n8n for Claude to answer from.
-async function handleAssistant(request, env) {
-  if (request.method !== "POST") {
-    return new Response(JSON.stringify({ error: "POST only" }),
-      { status: 405, headers: { "Content-Type": "application/json" } });
-  }
-  if (!env.AIRTABLE_PAT) {
-    return new Response(JSON.stringify({ error: "AIRTABLE_PAT not set" }),
-      { status: 500, headers: { "Content-Type": "application/json" } });
-  }
-  try {
-    const body = await request.json();
-    const question = ((body && body.question) || "").toString().slice(0, 2000);
-    const history = Array.isArray(body && body.history) ? body.history.slice(-10) : [];
-    if (!question) {
-      return new Response(JSON.stringify({ error: "missing question" }),
-        { status: 400, headers: { "Content-Type": "application/json" } });
-    }
-
-    const [acData, psData] = await Promise.all([
-      computeActiveClientsData(env),
-      computePrioritySignalsData(env),
-    ]);
-
-    const context = {
-      generatedAt: new Date().toISOString(),
-      activeClients: {
-        total: acData.total,
-        needsAttentionCount: acData.needsAttentionCount,
-        clients: (acData.clients || []).map((c) => ({
-          brand: c.brand,
-          onHold: c.onHold,
-          adsManaged: c.adsManaged,
-          creativeStrategists: c.creativeStrategists,
-          mediaBuyers: c.mediaBuyers,
-          hasBase: c.hasBase,
-          pendingCount: c.pendingCount,
-          adsToLaunchCount: c.adsToLaunchCount,
-          needsAttention: c.needsAttention,
-          error: c.error,
-        })),
-      },
-      prioritySignals: {
-        count: psData.count,
-        signals: (psData.signals || []).slice(0, 40).map((s) => ({
-          summary: s.summary,
-          date: s.date,
-          source: s.source,
-          signalType: s.signalType,
-          whoSaidIt: s.whoSaidIt,
-          regarding: s.regarding,
-          client: s.client,
-          reviewed: s.reviewed,
-        })),
-      },
-    };
-
-    const n8nController = new AbortController();
-    const n8nTimeout = setTimeout(() => n8nController.abort(), 45000);
-    let n8nRes;
-    try {
-      n8nRes = await fetch(ASSISTANT_WEBHOOK_URL, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ question, history, context }),
-        signal: n8nController.signal,
-      });
-    } finally {
-      clearTimeout(n8nTimeout);
-    }
-    if (!n8nRes.ok) {
-      const text = await n8nRes.text();
-      return new Response(JSON.stringify({ error: "Assistant " + n8nRes.status + ": " + text.slice(0, 300) }),
-        { status: 502, headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" } });
-    }
-    const n8nData = await n8nRes.json();
-    return new Response(JSON.stringify({ answer: n8nData.answer || "" }), {
-      headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" },
-    });
-  } catch (e) {
-    return new Response(JSON.stringify({ error: String(e.message || e) }),
-      { status: 502, headers: { "Content-Type": "application/json" } });
-  }
-}
 
 function projectConcept(r) {
   const f = r.fields;
@@ -1243,128 +1151,6 @@ async function handleLaunchDigest(request, env) {
       { status: 502, headers: { "Content-Type": "application/json" } });
   }
 }
-
-// Floating "Ask Luna" chat widget — injected into every dashboard page via
-// ${CHAT_WIDGET_HTML} interpolation so it's available everywhere, not just one page.
-// Talks to /assistant/api, which gathers live active-clients + priority-signals
-// context and forwards it to the n8n-hosted Claude assistant. History persists in
-// localStorage so it survives page navigation within the dashboard.
-const CHAT_WIDGET_HTML = `
-<style>
-  .luna-chat-btn { position: fixed; bottom: 24px; right: 24px; width: 56px; height: 56px; border-radius: 50%;
-    background: linear-gradient(135deg, #2821B5, #8321C8); color: #fff; border: none; cursor: pointer;
-    box-shadow: 0 4px 16px rgba(6,6,14,.25); font-size: 22px; z-index: 9999; display: flex; align-items: center; justify-content: center; }
-  .luna-chat-btn:hover { transform: scale(1.05); }
-  .luna-chat-panel { position: fixed; bottom: 90px; right: 24px; width: 360px; max-width: calc(100vw - 32px);
-    height: 480px; max-height: calc(100vh - 140px); background: #fff; border-radius: 14px; box-shadow: 0 8px 32px rgba(6,6,14,.2);
-    display: none; flex-direction: column; overflow: hidden; z-index: 9999;
-    font-family: -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", system-ui, sans-serif; border: 1px solid #E3E3E3; }
-  .luna-chat-panel.open { display: flex; }
-  .luna-chat-header { background: linear-gradient(135deg, #2821B5, #8321C8); color: #fff; padding: 12px 16px;
-    display: flex; align-items: center; justify-content: space-between; font-size: 13px; font-weight: 700; flex-shrink: 0; }
-  .luna-chat-header button { background: none; border: none; color: #fff; font-size: 16px; cursor: pointer; opacity: .85; }
-  .luna-chat-header button:hover { opacity: 1; }
-  .luna-chat-body { flex: 1; overflow-y: auto; padding: 12px 14px; background: #FAFAFA; }
-  .luna-chat-msg { margin-bottom: 10px; font-size: 13px; line-height: 1.5; max-width: 90%; white-space: pre-wrap; }
-  .luna-chat-msg.user { margin-left: auto; background: #2821B5; color: #fff; padding: 8px 12px; border-radius: 10px 10px 2px 10px; }
-  .luna-chat-msg.assistant { margin-right: auto; background: #fff; color: #06060E; padding: 8px 12px; border-radius: 10px 10px 10px 2px; border: 1px solid #E3E3E3; }
-  .luna-chat-msg.thinking { font-style: italic; color: #8F8F8F; background: none; border: none; padding: 0; }
-  .luna-chat-empty { text-align: center; color: #8F8F8F; font-size: 12px; padding: 30px 10px; }
-  .luna-chat-input-row { display: flex; gap: 8px; padding: 10px; border-top: 1px solid #E3E3E3; background: #fff; flex-shrink: 0; }
-  .luna-chat-input-row input { flex: 1; border: 1px solid #E3E3E3; border-radius: 8px; padding: 8px 10px; font-size: 13px; font-family: inherit; }
-  .luna-chat-input-row button { background: #2821B5; color: #fff; border: none; border-radius: 8px; padding: 0 14px; font-size: 13px; font-weight: 600; cursor: pointer; }
-  .luna-chat-input-row button:disabled { opacity: .5; cursor: wait; }
-</style>
-<button class="luna-chat-btn" id="lunaChatBtn" onclick="lunaToggleChat()" title="Ask Luna about your clients and signals">💬</button>
-<div class="luna-chat-panel" id="lunaChatPanel">
-  <div class="luna-chat-header">
-    <span>Ask Luna — Creative Pipeline</span>
-    <button onclick="lunaToggleChat()">✕</button>
-  </div>
-  <div class="luna-chat-body" id="lunaChatBody"></div>
-  <div class="luna-chat-input-row">
-    <input type="text" id="lunaChatInput" placeholder="Ask about clients, signals, launches…" onkeydown="if(event.key==='Enter')lunaSendChat()" />
-    <button id="lunaChatSendBtn" onclick="lunaSendChat()">Send</button>
-  </div>
-</div>
-<script>
-(function() {
-  var LUNA_HISTORY_KEY = 'luna_chat_history_v1';
-  var lunaHistory = [];
-  try { lunaHistory = JSON.parse(localStorage.getItem(LUNA_HISTORY_KEY) || '[]'); } catch (e) { lunaHistory = []; }
-
-  function lunaRenderHistory() {
-    var body = document.getElementById('lunaChatBody');
-    if (!body) return;
-    if (lunaHistory.length === 0) {
-      body.innerHTML = '<div class="luna-chat-empty">Ask me anything about active clients, pending creatives, ads ready to launch, or recent priority signals.</div>';
-      return;
-    }
-    body.innerHTML = lunaHistory.map(function(m) {
-      return '<div class="luna-chat-msg ' + (m.role === 'user' ? 'user' : 'assistant') + '">' + lunaEsc(m.content) + '</div>';
-    }).join('');
-    body.scrollTop = body.scrollHeight;
-  }
-
-  function lunaEsc(str) {
-    return String(str || '').replace(/[&<>"']/g, function(c) {
-      return ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c];
-    });
-  }
-
-  window.lunaToggleChat = function() {
-    var panel = document.getElementById('lunaChatPanel');
-    if (!panel) return;
-    panel.classList.toggle('open');
-    if (panel.classList.contains('open')) {
-      lunaRenderHistory();
-      var input = document.getElementById('lunaChatInput');
-      if (input) input.focus();
-    }
-  };
-
-  window.lunaSendChat = function() {
-    var input = document.getElementById('lunaChatInput');
-    var btn = document.getElementById('lunaChatSendBtn');
-    var body = document.getElementById('lunaChatBody');
-    if (!input || !input.value.trim()) return;
-    var question = input.value.trim();
-    input.value = '';
-    lunaHistory.push({ role: 'user', content: question });
-    lunaRenderHistory();
-    localStorage.setItem(LUNA_HISTORY_KEY, JSON.stringify(lunaHistory));
-
-    var thinking = document.createElement('div');
-    thinking.className = 'luna-chat-msg thinking';
-    thinking.textContent = 'Thinking…';
-    body.appendChild(thinking);
-    body.scrollTop = body.scrollHeight;
-    btn.disabled = true;
-
-    fetch('/assistant/api', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ question: question, history: lunaHistory.slice(-10, -1) }),
-    })
-      .then(function(r) { return r.json(); })
-      .then(function(data) {
-        var answer = data.answer || data.error || 'Sorry, I could not get an answer.';
-        lunaHistory.push({ role: 'assistant', content: answer });
-        localStorage.setItem(LUNA_HISTORY_KEY, JSON.stringify(lunaHistory));
-        lunaRenderHistory();
-      })
-      .catch(function(e) {
-        lunaHistory.push({ role: 'assistant', content: 'Something went wrong reaching the assistant: ' + (e.message || e) });
-        localStorage.setItem(LUNA_HISTORY_KEY, JSON.stringify(lunaHistory));
-        lunaRenderHistory();
-      })
-      .finally(function() {
-        btn.disabled = false;
-      });
-  };
-})();
-</script>
-`;
 
 const PIPELINE_HTML = `<!doctype html>
 <html lang="en">
@@ -2695,7 +2481,6 @@ function renderUgcSection(ugc, baseId) {
 
 loadData();
 </script>
-${CHAT_WIDGET_HTML}
 </body>
 </html>
 `;
@@ -3480,7 +3265,6 @@ function esc(str) {
 
 loadData(false);
 </script>
-${CHAT_WIDGET_HTML}
 </body>
 </html>
 `;
@@ -3714,7 +3498,6 @@ function esc(str) {
 
 loadData(false);
 </script>
-${CHAT_WIDGET_HTML}
 </body>
 </html>
 `;
@@ -3764,9 +3547,6 @@ export default {
           "Cache-Control": "public, max-age=300",
         },
       });
-    }
-    if (url.pathname === "/assistant/api") {
-      return handleAssistant(request, env);
     }
     // On the dedicated pipeline domain (pipeline.tas-digital.ai), the pipeline
     // IS the homepage — no /pipeline path needed. API calls above still use
