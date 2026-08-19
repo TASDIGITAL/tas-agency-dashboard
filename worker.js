@@ -722,6 +722,46 @@ async function handleCsmSummary(request, env) {
   }
 }
 
+// POST /csm/task/complete  { id, done }
+// Lets the dashboard tick a CSM task off (or reopen it) without leaving the page.
+async function handleCsmTaskUpdate(request, env) {
+  if (!env.AIRTABLE_PAT) {
+    return new Response(JSON.stringify({ error: "AIRTABLE_PAT not set" }),
+      { status: 500, headers: { "Content-Type": "application/json" } });
+  }
+  if (request.method !== "POST") {
+    return new Response(JSON.stringify({ error: "POST only" }),
+      { status: 405, headers: { "Content-Type": "application/json" } });
+  }
+  try {
+    const body = await request.json();
+    const id = body && body.id;
+    if (!id) {
+      return new Response(JSON.stringify({ error: "missing id" }),
+        { status: 400, headers: { "Content-Type": "application/json" } });
+    }
+    const status = body.done === false ? "To Do" : "Done";
+    const res = await fetch(`https://api.airtable.com/v0/${PIPELINE_BASE_ID}/${CSM_TASKS_TBL}`, {
+      method: "PATCH",
+      headers: {
+        Authorization: `Bearer ${env.AIRTABLE_PAT}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ records: [{ id, fields: { "Status": status } }] }),
+    });
+    if (!res.ok) {
+      const text = await res.text();
+      return new Response(JSON.stringify({ error: `Airtable ${res.status}: ${text.slice(0, 200)}` }),
+        { status: 502, headers: { "Content-Type": "application/json" } });
+    }
+    return new Response(JSON.stringify({ ok: true }),
+      { headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" } });
+  } catch (e) {
+    return new Response(JSON.stringify({ error: String(e.message || e) }),
+      { status: 502, headers: { "Content-Type": "application/json" } });
+  }
+}
+
 // GET /active-clients/api — full active-client roster cross-checked against the
 // creative pipeline: which clients have a Creative Base ID linked, whether their
 // base actually resolves (structure detection succeeds), and live pending-item
@@ -3717,6 +3757,11 @@ const CSM_SUMMARY_HTML = `<!doctype html>
   .task-pri-urgent { background: var(--brand-rose-light); color: var(--brand-rose); }
   .task-pri-high { background: #FBF0DA; color: #8A5A00; }
   .task-pri-normal { background: var(--line-soft); color: var(--ink-faint); }
+  .task-box { cursor: pointer; user-select: none; }
+  .task-box:hover { color: var(--brand-blue); }
+  li.task-row.task-done { opacity: 0.45; }
+  li.task-row.task-done .task-text { text-decoration: line-through; }
+  li.task-row.task-done .task-box { cursor: default; color: var(--brand-sage); }
 
   .filters { display: flex; gap: 10px; margin-bottom: 16px; }
   .filters input[type="text"] { flex: 1; border: 1px solid var(--line); border-radius: 8px;
@@ -3839,12 +3884,45 @@ function tasksHtml(tasks) {
     return '<ul class="bullets none"><li>No open tasks.</li></ul>';
   }
   return '<ul class="tasks">' + tasks.map(function(t) {
-    return '<li class="task-row' + (t.type === 'Opportunity' ? ' task-opportunity' : '') + '">' +
-      '<span class="task-box">' + (t.type === 'Opportunity' ? String.fromCharCode(9733) : String.fromCharCode(9744)) + '</span>' +
+    return '<li class="task-row' + (t.type === 'Opportunity' ? ' task-opportunity' : '') + '" data-task-id="' + esc(t.id) + '">' +
+      '<span class="task-box" onclick="completeTask(this)" title="Mark done">' + (t.type === 'Opportunity' ? String.fromCharCode(9733) : String.fromCharCode(9744)) + '</span>' +
       '<span class="task-text">' + esc(t.task) + '</span>' +
       taskPriorityTag(t.priority) +
     '</li>';
   }).join('') + '</ul>';
+}
+
+function completeTask(boxEl) {
+  var row = boxEl.closest('li.task-row');
+  if (!row || row.classList.contains('task-done')) return;
+  var id = row.getAttribute('data-task-id');
+  row.classList.add('task-done');
+  boxEl.textContent = String.fromCharCode(9745);
+  fetch('/csm/task/complete', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ id: id, done: true }),
+  })
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+      if (data.error) throw new Error(data.error);
+      setTimeout(function() {
+        row.style.display = 'none';
+        var card = row.closest('.client-card');
+        var openTasksStat = document.querySelector('.stats-row .stat:last-child .num');
+        if (openTasksStat) openTasksStat.textContent = Math.max(0, parseInt(openTasksStat.textContent, 10) - 1);
+        if (card) {
+          var heading = card.querySelector('.col-title.open');
+          var remaining = card.querySelectorAll('li.task-row:not(.task-done)').length;
+          if (heading) heading.textContent = 'Tasks' + (remaining > 0 ? ' (' + remaining + ')' : '');
+        }
+      }, 500);
+    })
+    .catch(function(e) {
+      row.classList.remove('task-done');
+      boxEl.textContent = String.fromCharCode(9744);
+      alert('Could not mark task done: ' + (e.message || e));
+    });
 }
 
 function render() {
@@ -3946,6 +4024,9 @@ export default {
     }
     if (url.pathname === "/csm/api") {
       return handleCsmSummary(request, env);
+    }
+    if (url.pathname === "/csm/task/complete") {
+      return handleCsmTaskUpdate(request, env);
     }
     if (url.pathname.startsWith("/csm/") && url.pathname.length > 5) {
       return new Response(CSM_SUMMARY_HTML, {
