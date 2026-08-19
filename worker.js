@@ -606,12 +606,22 @@ async function handleMarkSignalReviewed(request, env) {
 }
 
 // CSM Client Summaries: per-client rollups for each Client Success Manager,
-// synthesized from Fathom biweekly meeting notes + Slack channel activity.
+// synthesized from Fathom biweekly meeting notes + Slack channel activity
+// (including each ads-managed client's weekly "Ads Performance Report" Slack
+// file/canvas, which has real Spend/Revenue/ROAS/CPA numbers — not just chat).
 // Currently populated manually (proof of concept for Victoria) — a future n8n
 // job could refresh this on a schedule the same way Priority Signals does, using
 // the Fathom Admin API + Slack API rather than this worker fetching them live
 // (this worker only has an Airtable credential, not Slack/Fathom credentials).
 const CSM_SUMMARIES_TBL = "tblxnUc2st01Hcnet";
+
+// Individual open tasks per client (read-only list on the dashboard — checking
+// one off still requires editing Airtable directly, no write-back yet). Each
+// client's Risk badge is meant to be kept in sync with these: any open Urgent
+// "Action Needed" task -> At Risk, any open High -> Watch, otherwise Healthy —
+// except "Wrapping Up", which is a manual lifecycle override (account closed/
+// closing) rather than a severity level, so it isn't recomputed from tasks.
+const CSM_TASKS_TBL = "tblRzFAghJihrxcnF";
 
 function projectCsmSummary(r) {
   const f = r.fields;
@@ -624,20 +634,50 @@ function projectCsmSummary(r) {
     status: f["Status"] || null,
     risk: f["Risk"] || null,
     summary: bullets(f["Summary"]),
-    openItems: bullets(f["Open Items"]),
     lastMeetingDate: f["Last Meeting Date"] || null,
     lastMeetingLink: f["Last Meeting Link"] || null,
     slackChannel: f["Slack Channel"] || null,
     slackChannelLink: f["Slack Channel Link"] || null,
     dataAsOf: f["Data As Of"] || null,
+    tasks: [],
+  };
+}
+
+function projectCsmTask(r) {
+  const f = r.fields;
+  return {
+    id: r.id,
+    brand: f["Brand"] || null,
+    task: f["Task"] || "",
+    priority: f["Priority"] || "Normal",
+    type: f["Type"] || "Action Needed",
+    status: f["Status"] || "To Do",
   };
 }
 
 async function computeCsmSummaryData(env, slug) {
   const safeSlug = String(slug || "").replace(/'/g, "\\'");
   const filterFormula = `LOWER({CSM Slug}) = '${safeSlug.toLowerCase()}'`;
-  const records = await fetchTableRecords(PIPELINE_BASE_ID, CSM_SUMMARIES_TBL, env.AIRTABLE_PAT, filterFormula);
-  const clients = records.map(projectCsmSummary);
+  const [summaryRecords, taskRecords] = await Promise.all([
+    fetchTableRecords(PIPELINE_BASE_ID, CSM_SUMMARIES_TBL, env.AIRTABLE_PAT, filterFormula),
+    fetchTableRecords(PIPELINE_BASE_ID, CSM_TASKS_TBL, env.AIRTABLE_PAT,
+      `AND(${filterFormula}, {Status} = 'To Do')`),
+  ]);
+  const clients = summaryRecords.map(projectCsmSummary);
+  const tasksByBrand = {};
+  taskRecords.map(projectCsmTask).forEach((t) => {
+    if (!t.brand) return;
+    (tasksByBrand[t.brand] = tasksByBrand[t.brand] || []).push(t);
+  });
+  const priorityOrder = { Urgent: 0, High: 1, Normal: 2 };
+  let openTasksCount = 0;
+  clients.forEach((c) => {
+    const tasks = (tasksByBrand[c.brand] || []).sort(
+      (a, b) => (priorityOrder[a.priority] ?? 9) - (priorityOrder[b.priority] ?? 9)
+    );
+    c.tasks = tasks;
+    openTasksCount += tasks.filter((t) => t.type === "Action Needed").length;
+  });
   const riskOrder = { "At Risk": 0, "Watch": 1, "Wrapping Up": 2, "Healthy": 3 };
   clients.sort((a, b) => {
     if (a.status !== b.status) return a.status === "Active" ? -1 : 1;
@@ -654,6 +694,7 @@ async function computeCsmSummaryData(env, slug) {
     activeCount: clients.filter((c) => c.status === "Active").length,
     onHoldCount: clients.filter((c) => c.status === "On Hold").length,
     atRiskCount: clients.filter((c) => c.risk === "At Risk").length,
+    openTasksCount,
     clients,
   };
 }
@@ -3666,6 +3707,16 @@ const CSM_SUMMARY_HTML = `<!doctype html>
   ul.bullets { margin: 0; padding-left: 18px; font-size: 13px; color: var(--ink); }
   ul.bullets li { margin-bottom: 4px; }
   ul.bullets.none { color: var(--ink-faint); font-style: italic; list-style: none; padding-left: 0; }
+  ul.tasks { list-style: none; margin: 0; padding: 0; }
+  li.task-row { display: flex; align-items: baseline; gap: 6px; font-size: 13px; color: var(--ink); margin-bottom: 6px; }
+  .task-box { flex-shrink: 0; color: var(--ink-faint); }
+  .task-opportunity .task-box { color: var(--brand-sage); }
+  .task-text { flex: 1; }
+  .task-pri { flex-shrink: 0; font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: .04em;
+    padding: 1px 6px; border-radius: 5px; }
+  .task-pri-urgent { background: var(--brand-rose-light); color: var(--brand-rose); }
+  .task-pri-high { background: #FBF0DA; color: #8A5A00; }
+  .task-pri-normal { background: var(--line-soft); color: var(--ink-faint); }
 
   .filters { display: flex; gap: 10px; margin-bottom: 16px; }
   .filters input[type="text"] { flex: 1; border: 1px solid var(--line); border-radius: 8px;
@@ -3761,7 +3812,8 @@ function renderStats(data) {
     stat(data.total, 'Total Clients') +
     stat(data.activeCount, 'Active') +
     stat(data.onHoldCount, 'On Hold') +
-    stat(data.atRiskCount, 'At Risk', data.atRiskCount > 0);
+    stat(data.atRiskCount, 'At Risk', data.atRiskCount > 0) +
+    stat(data.openTasksCount, 'Open Tasks');
 }
 
 function riskPill(risk) {
@@ -3775,6 +3827,24 @@ function bulletsHtml(items, emptyLabel) {
     return '<ul class="bullets none"><li>' + esc(emptyLabel) + '</li></ul>';
   }
   return '<ul class="bullets">' + items.map(i => '<li>' + esc(i) + '</li>').join('') + '</ul>';
+}
+
+function taskPriorityTag(priority) {
+  var cls = 'task-pri-' + String(priority || 'normal').toLowerCase();
+  return '<span class="task-pri ' + cls + '">' + esc(priority || 'Normal') + '</span>';
+}
+
+function tasksHtml(tasks) {
+  if (!tasks || tasks.length === 0) {
+    return '<ul class="bullets none"><li>No open tasks.</li></ul>';
+  }
+  return '<ul class="tasks">' + tasks.map(function(t) {
+    return '<li class="task-row' + (t.type === 'Opportunity' ? ' task-opportunity' : '') + '">' +
+      '<span class="task-box">' + (t.type === 'Opportunity' ? String.fromCharCode(9733) : String.fromCharCode(9744)) + '</span>' +
+      '<span class="task-text">' + esc(t.task) + '</span>' +
+      taskPriorityTag(t.priority) +
+    '</li>';
+  }).join('') + '</ul>';
 }
 
 function render() {
@@ -3802,6 +3872,9 @@ function cardHtml(c) {
   else links.push('<span>📹 No recent meeting found</span>');
   if (c.slackChannelLink) links.push('<a href="' + esc(c.slackChannelLink) + '" target="_blank" rel="noopener">💬 ' + esc(c.slackChannel || 'Slack channel') + '</a>');
 
+  const taskCount = (c.tasks || []).filter(t => t.type === 'Action Needed').length;
+  const taskLabel = 'Tasks' + (taskCount > 0 ? ' (' + taskCount + ')' : '');
+
   return '<div class="client-card ' + riskClass + '">' +
     '<div class="card-head">' +
       '<div class="name">' + esc(c.brand) + '</div>' +
@@ -3810,7 +3883,7 @@ function cardHtml(c) {
     '<div class="card-links">' + links.join('') + '</div>' +
     '<div class="card-cols">' +
       '<div><div class="col-title">What\\u2019s happening</div>' + bulletsHtml(c.summary, 'No recent activity captured.') + '</div>' +
-      '<div><div class="col-title open">Open items</div>' + bulletsHtml(c.openItems, 'None spotted.') + '</div>' +
+      '<div><div class="col-title open">' + taskLabel + '</div>' + tasksHtml(c.tasks) + '</div>' +
     '</div>' +
   '</div>';
 }
