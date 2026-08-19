@@ -605,6 +605,82 @@ async function handleMarkSignalReviewed(request, env) {
   }
 }
 
+// CSM Client Summaries: per-client rollups for each Client Success Manager,
+// synthesized from Fathom biweekly meeting notes + Slack channel activity.
+// Currently populated manually (proof of concept for Victoria) — a future n8n
+// job could refresh this on a schedule the same way Priority Signals does, using
+// the Fathom Admin API + Slack API rather than this worker fetching them live
+// (this worker only has an Airtable credential, not Slack/Fathom credentials).
+const CSM_SUMMARIES_TBL = "tblxnUc2st01Hcnet";
+
+function projectCsmSummary(r) {
+  const f = r.fields;
+  const bullets = (v) => String(v || "").split("\n").map((s) => s.replace(/^-\s*/, "").trim()).filter(Boolean);
+  return {
+    id: r.id,
+    brand: f["Brand"] || "(unnamed)",
+    csm: f["CSM"] || null,
+    csmSlug: f["CSM Slug"] || null,
+    status: f["Status"] || null,
+    risk: f["Risk"] || null,
+    summary: bullets(f["Summary"]),
+    openItems: bullets(f["Open Items"]),
+    lastMeetingDate: f["Last Meeting Date"] || null,
+    lastMeetingLink: f["Last Meeting Link"] || null,
+    slackChannel: f["Slack Channel"] || null,
+    slackChannelLink: f["Slack Channel Link"] || null,
+    dataAsOf: f["Data As Of"] || null,
+  };
+}
+
+async function computeCsmSummaryData(env, slug) {
+  const safeSlug = String(slug || "").replace(/'/g, "\\'");
+  const filterFormula = `LOWER({CSM Slug}) = '${safeSlug.toLowerCase()}'`;
+  const records = await fetchTableRecords(PIPELINE_BASE_ID, CSM_SUMMARIES_TBL, env.AIRTABLE_PAT, filterFormula);
+  const clients = records.map(projectCsmSummary);
+  const riskOrder = { "At Risk": 0, "Watch": 1, "Wrapping Up": 2, "Healthy": 3 };
+  clients.sort((a, b) => {
+    if (a.status !== b.status) return a.status === "Active" ? -1 : 1;
+    const ra = riskOrder[a.risk] ?? 9;
+    const rb = riskOrder[b.risk] ?? 9;
+    if (ra !== rb) return ra - rb;
+    return a.brand.localeCompare(b.brand);
+  });
+  return {
+    generatedAt: new Date().toISOString(),
+    csm: clients[0] ? clients[0].csm : slug,
+    dataAsOf: clients[0] ? clients[0].dataAsOf : null,
+    total: clients.length,
+    activeCount: clients.filter((c) => c.status === "Active").length,
+    onHoldCount: clients.filter((c) => c.status === "On Hold").length,
+    atRiskCount: clients.filter((c) => c.risk === "At Risk").length,
+    clients,
+  };
+}
+
+// GET /csm/api?slug=victoria
+async function handleCsmSummary(request, env) {
+  if (!env.AIRTABLE_PAT) {
+    return new Response(JSON.stringify({ error: "AIRTABLE_PAT not set" }),
+      { status: 500, headers: { "Content-Type": "application/json" } });
+  }
+  const url = new URL(request.url);
+  const slug = url.searchParams.get("slug") || "";
+  if (!slug) {
+    return new Response(JSON.stringify({ error: "missing slug" }),
+      { status: 400, headers: { "Content-Type": "application/json" } });
+  }
+  try {
+    const data = await computeCsmSummaryData(env, slug);
+    return new Response(JSON.stringify(data), {
+      headers: { "Content-Type": "application/json", "Cache-Control": "public, max-age=120" },
+    });
+  } catch (e) {
+    return new Response(JSON.stringify({ error: String(e.message || e) }),
+      { status: 502, headers: { "Content-Type": "application/json" } });
+  }
+}
+
 // GET /active-clients/api — full active-client roster cross-checked against the
 // creative pipeline: which clients have a Creative Base ID linked, whether their
 // base actually resolves (structure detection succeeds), and live pending-item
@@ -3385,6 +3461,8 @@ const ACTIVE_CLIENTS_HTML = `<!doctype html>
         <a href="/">Home</a>
         <span class="sep">·</span>
         <a href="/priority-signals">Priority Signals</a>
+        <span class="sep">·</span>
+        <a href="/csm/victoria">Victoria's Summary</a>
       </div>
     </div>
     <div class="topbar-right">
@@ -3502,6 +3580,251 @@ loadData(false);
 </html>
 `;
 
+const CSM_SUMMARY_HTML = `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>TAS Digital — CSM Summary</title>
+<style>
+  :root {
+    color-scheme: light;
+    --brand-blue: #2821B5;
+    --brand-blue-light: #E1E0F9;
+    --brand-blue-dark: #181839;
+    --brand-purple: #8321C8;
+    --brand-purple-light: #F0E1FA;
+    --brand-rose: #A63446;
+    --brand-rose-light: #F6E3E6;
+    --brand-sage: #66A396;
+    --brand-sage-light: #ECF4F2;
+    --ink: #06060E;
+    --ink-soft: #4A5263;
+    --ink-faint: #8F8F8F;
+    --line: #E3E3E3;
+    --line-soft: #F1F1F1;
+    --bg: #FAFAFA;
+    --card: #FFFFFF;
+    --shadow: 0 1px 3px rgba(6,6,14,.04), 0 4px 16px rgba(6,6,14,.05);
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; background: var(--bg); color: var(--ink);
+    font-family: -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", system-ui, sans-serif;
+    font-size: 14px; line-height: 1.55; }
+  .wrap { max-width: 1080px; margin: 0 auto; padding: 28px 24px 60px; }
+  nav.topbar { display: flex; align-items: center; justify-content: space-between;
+    margin-bottom: 28px; padding-bottom: 16px; border-bottom: 1px solid var(--line); }
+  .brand-mark { display: flex; align-items: center; gap: 10px; text-decoration: none; }
+  .brand-mark .logo { height: 30px; width: auto; display: block; flex-shrink: 0; pointer-events: none; }
+  .brand-mark .label { font-size: 11px; font-weight: 600; letter-spacing: .14em;
+    text-transform: uppercase; color: var(--brand-blue); }
+  .crumb { display: flex; gap: 8px; align-items: center; color: var(--ink-soft); font-size: 13px; margin-top: 4px; }
+  .crumb a { color: var(--brand-blue); text-decoration: none; font-weight: 500; cursor: pointer; }
+  .crumb a:hover { text-decoration: underline; }
+  .crumb .sep { color: var(--ink-faint); }
+  .topbar-right { display: flex; gap: 10px; align-items: center; }
+  .topbar-right .ts { font-size: 11px; color: var(--ink-faint); font-variant-numeric: tabular-nums; }
+  button.refresh { background: var(--brand-blue); color: white; border: none;
+    padding: 8px 14px; border-radius: 8px; font-size: 12px; font-weight: 600;
+    cursor: pointer; transition: all .15s ease; letter-spacing: .02em; }
+  button.refresh:hover { background: var(--brand-blue-dark); }
+  button.refresh:disabled { opacity: 0.5; cursor: wait; }
+  h1 { font-size: 24px; font-weight: 700; margin: 0 0 4px; letter-spacing: -.02em; text-transform: capitalize; }
+  .sub { color: var(--ink-soft); font-size: 13px; margin-bottom: 22px; }
+
+  .stats-row { display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 24px; }
+  .stat { background: var(--card); border: 1px solid var(--line); border-radius: 10px;
+    padding: 12px 16px; min-width: 120px; box-shadow: var(--shadow); }
+  .stat .num { font-size: 22px; font-weight: 700; color: var(--ink); }
+  .stat .lbl { font-size: 11px; color: var(--ink-faint); text-transform: uppercase; letter-spacing: .05em; margin-top: 2px; }
+  .stat.warn .num { color: var(--brand-rose); }
+
+  .group-title { font-size: 15px; font-weight: 700; margin: 26px 0 12px; display: flex; align-items: baseline; gap: 8px; }
+  .group-count { font-size: 12px; color: var(--ink-faint); font-weight: 500; }
+
+  .client-card { background: var(--card); border: 1px solid var(--line); border-radius: 12px;
+    padding: 16px 18px; margin-bottom: 14px; box-shadow: var(--shadow); }
+  .client-card.risk-at-risk { border-left: 4px solid var(--brand-rose); }
+  .client-card.risk-watch { border-left: 4px solid #C88A1E; }
+  .client-card.risk-wrapping-up { border-left: 4px solid var(--ink-faint); }
+  .client-card.risk-healthy { border-left: 4px solid var(--brand-sage); }
+  .card-head { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px; margin-bottom: 10px; }
+  .card-head .name { font-size: 16px; font-weight: 700; }
+  .pill { display: inline-block; font-size: 11px; font-weight: 600; padding: 3px 8px; border-radius: 6px; white-space: nowrap; }
+  .pill-healthy { background: var(--brand-sage-light); color: #2E6B5E; }
+  .pill-watch { background: #FBF0DA; color: #8A5A00; }
+  .pill-at-risk { background: var(--brand-rose-light); color: var(--brand-rose); }
+  .pill-wrapping-up { background: var(--line-soft); color: var(--ink-soft); }
+  .pill-hold { background: var(--line-soft); color: var(--ink-soft); }
+  .card-links { font-size: 12px; color: var(--ink-faint); display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 12px; }
+  .card-links a { color: var(--brand-blue); text-decoration: none; }
+  .card-links a:hover { text-decoration: underline; }
+  .card-cols { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+  @media (max-width: 720px) { .card-cols { grid-template-columns: 1fr; } }
+  .col-title { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .05em; color: var(--ink-faint); margin-bottom: 6px; }
+  .col-title.open { color: var(--brand-rose); }
+  ul.bullets { margin: 0; padding-left: 18px; font-size: 13px; color: var(--ink); }
+  ul.bullets li { margin-bottom: 4px; }
+  ul.bullets.none { color: var(--ink-faint); font-style: italic; list-style: none; padding-left: 0; }
+
+  .filters { display: flex; gap: 10px; margin-bottom: 16px; }
+  .filters input[type="text"] { flex: 1; border: 1px solid var(--line); border-radius: 8px;
+    padding: 7px 10px; font-size: 13px; font-family: inherit; background: var(--card); color: var(--ink); }
+
+  .empty, .loading { text-align: center; color: var(--ink-faint); padding: 40px 20px; font-size: 13px; }
+  footer { margin-top: 32px; padding-top: 16px; border-top: 1px solid var(--line);
+    color: var(--ink-faint); font-size: 11px; text-align: center; text-transform: uppercase; letter-spacing: .08em; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <nav class="topbar">
+    <div>
+      <div class="brand-mark">
+        <svg class="logo" viewBox="0 0 470 100" xmlns="http://www.w3.org/2000/svg" aria-label="TAS Digital" role="img">
+          <defs>
+            <linearGradient id="tasG" x1="0" y1="0" x2="1" y2="1">
+              <stop offset="0%" stop-color="#2821B5"/>
+              <stop offset="100%" stop-color="#8321C8"/>
+            </linearGradient>
+          </defs>
+          <g fill="none" stroke="url(#tasG)">
+            <circle cx="50" cy="50" r="44" stroke-width="6"/>
+            <circle cx="50" cy="50" r="30" stroke-width="5"/>
+            <ellipse cx="50" cy="50" rx="12" ry="18" stroke-width="4"/>
+          </g>
+          <text x="120" y="65" font-family="-apple-system,BlinkMacSystemFont,'Inter','Segoe UI',system-ui,sans-serif" font-size="42" font-weight="300" letter-spacing="6" fill="url(#tasG)">TAS DIGITAL</text>
+        </svg>
+        <span class="label" id="crumb-label">· CSM Summary</span>
+      </div>
+      <div class="crumb">
+        <a href="/">Home</a>
+        <span class="sep">·</span>
+        <a href="/active-clients">Active Clients</a>
+        <span class="sep">·</span>
+        <a href="/priority-signals">Priority Signals</a>
+      </div>
+    </div>
+    <div class="topbar-right">
+      <span class="ts" id="ts">Loading…</span>
+      <button class="refresh" id="refresh-btn" onclick="loadData(true)">↻ Refresh</button>
+    </div>
+  </nav>
+
+  <h1 id="page-title">CSM Summary</h1>
+  <div class="sub">Per-client rollup synthesized from Fathom biweekly meeting notes and Slack channel activity — what's happening, and what still needs doing.</div>
+
+  <div id="stats" class="stats-row"></div>
+
+  <div class="filters">
+    <input type="text" id="search" placeholder="Search brand…" oninput="render()" />
+  </div>
+
+  <div id="root"><div class="loading">Loading…</div></div>
+
+  <footer>Manually compiled proof-of-concept · 🧑‍💼 CSM Client Summaries table in Airtable</footer>
+</div>
+<script>
+let ALL = [];
+let CSM_SLUG = (location.pathname.split('/').filter(Boolean).pop() || '').toLowerCase();
+
+async function loadData(force) {
+  const btn = document.getElementById('refresh-btn');
+  btn.disabled = true;
+  btn.textContent = '↻ Loading…';
+  try {
+    const res = await fetch('/csm/api?slug=' + encodeURIComponent(CSM_SLUG) + (force ? '&refresh=1' : ''));
+    const data = await res.json();
+    if (data.error) throw new Error(data.error);
+    ALL = data.clients || [];
+    const csmName = data.csm || CSM_SLUG;
+    document.getElementById('page-title').textContent = csmName + '\\u2019s Clients';
+    document.getElementById('crumb-label').textContent = '· ' + csmName;
+    document.title = 'TAS Digital — ' + csmName;
+    document.getElementById('ts').textContent = data.dataAsOf ? 'Data as of ' + data.dataAsOf : 'Updated ' + new Date(data.generatedAt).toLocaleString();
+    renderStats(data);
+    render();
+  } catch (e) {
+    document.getElementById('root').innerHTML = '<div class="empty">Failed to load: ' + (e.message || e) + '</div>';
+  } finally {
+    btn.disabled = false;
+    btn.textContent = '↻ Refresh';
+  }
+}
+
+function stat(num, label, warn) {
+  return '<div class="stat' + (warn ? ' warn' : '') + '"><div class="num">' + num + '</div><div class="lbl">' + label + '</div></div>';
+}
+
+function renderStats(data) {
+  document.getElementById('stats').innerHTML =
+    stat(data.total, 'Total Clients') +
+    stat(data.activeCount, 'Active') +
+    stat(data.onHoldCount, 'On Hold') +
+    stat(data.atRiskCount, 'At Risk', data.atRiskCount > 0);
+}
+
+function riskPill(risk) {
+  if (!risk) return '';
+  const cls = 'pill-' + risk.toLowerCase().replace(/\\s+/g, '-');
+  return '<span class="pill ' + cls + '">' + esc(risk) + '</span>';
+}
+
+function bulletsHtml(items, emptyLabel) {
+  if (!items || items.length === 0) {
+    return '<ul class="bullets none"><li>' + esc(emptyLabel) + '</li></ul>';
+  }
+  return '<ul class="bullets">' + items.map(i => '<li>' + esc(i) + '</li>').join('') + '</ul>';
+}
+
+function render() {
+  const q = (document.getElementById('search').value || '').toLowerCase().trim();
+  const rows = ALL.filter(c => !q || c.brand.toLowerCase().includes(q));
+  const root = document.getElementById('root');
+  if (rows.length === 0) { root.innerHTML = '<div class="empty">No clients match this search.</div>'; return; }
+
+  const active = rows.filter(c => c.status === 'Active');
+  const onHold = rows.filter(c => c.status !== 'Active');
+
+  root.innerHTML = section('Active', active) + section('On Hold', onHold);
+}
+
+function section(title, rows) {
+  if (rows.length === 0) return '';
+  return '<div class="group-title">' + title + '<span class="group-count">(' + rows.length + ')</span></div>' +
+    rows.map(cardHtml).join('');
+}
+
+function cardHtml(c) {
+  const riskClass = 'risk-' + (c.risk || 'healthy').toLowerCase().replace(/\\s+/g, '-');
+  const links = [];
+  if (c.lastMeetingLink) links.push('<a href="' + esc(c.lastMeetingLink) + '" target="_blank" rel="noopener">📹 Last meeting' + (c.lastMeetingDate ? ' (' + esc(c.lastMeetingDate) + ')' : '') + '</a>');
+  else links.push('<span>📹 No recent meeting found</span>');
+  if (c.slackChannelLink) links.push('<a href="' + esc(c.slackChannelLink) + '" target="_blank" rel="noopener">💬 ' + esc(c.slackChannel || 'Slack channel') + '</a>');
+
+  return '<div class="client-card ' + riskClass + '">' +
+    '<div class="card-head">' +
+      '<div class="name">' + esc(c.brand) + '</div>' +
+      '<div>' + riskPill(c.risk) + (c.status === 'On Hold' ? ' <span class="pill pill-hold">On Hold</span>' : '') + '</div>' +
+    '</div>' +
+    '<div class="card-links">' + links.join('') + '</div>' +
+    '<div class="card-cols">' +
+      '<div><div class="col-title">What\\u2019s happening</div>' + bulletsHtml(c.summary, 'No recent activity captured.') + '</div>' +
+      '<div><div class="col-title open">Open items</div>' + bulletsHtml(c.openItems, 'None spotted.') + '</div>' +
+    '</div>' +
+  '</div>';
+}
+
+function esc(str) {
+  return String(str || '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+
+loadData(false);
+</script>
+</body>
+</html>
+`;
+
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
@@ -3542,6 +3865,17 @@ export default {
     }
     if (url.pathname === "/active-clients") {
       return new Response(ACTIVE_CLIENTS_HTML, {
+        headers: {
+          "Content-Type": "text/html; charset=utf-8",
+          "Cache-Control": "public, max-age=300",
+        },
+      });
+    }
+    if (url.pathname === "/csm/api") {
+      return handleCsmSummary(request, env);
+    }
+    if (url.pathname.startsWith("/csm/") && url.pathname.length > 5) {
+      return new Response(CSM_SUMMARY_HTML, {
         headers: {
           "Content-Type": "text/html; charset=utf-8",
           "Cache-Control": "public, max-age=300",
