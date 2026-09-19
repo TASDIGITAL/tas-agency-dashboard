@@ -1762,11 +1762,13 @@ const PEOPLE = [
   { slug: "rajan",    display: "Rajan",    role: "Creative Strategist", group: "cs",  field: "creativeStrategists",  match: ["rajan"],   alwaysShow: false },
   { slug: "zainab",   display: "Zainab",   role: "Creative Strategist", group: "cs",  field: "creativeStrategists",  match: ["zainab"],  alwaysShow: false },
   { slug: "aziz",     display: "Aziz",     role: "Creative Strategist", group: "cs",  field: "creativeStrategists",  match: ["abdelaziz", "aziz"], alwaysShow: false },
+  { slug: "diana",    display: "Diana",    role: "Creative Strategist", group: "cs",  field: "creativeStrategists",  match: ["diana"],   alwaysShow: false },
   // === Video Editors === (matched via item.assignee)
   { slug: "muhammad-faiz", display: "Muhammad Faiz", role: "Video Editor", group: "video_editor", field: "videoEditors", match: ["faiz"],          alwaysShow: false },
   { slug: "med",           display: "Med",           role: "Video Editor", group: "video_editor", field: "videoEditors", match: ["med"],           alwaysShow: false },
   { slug: "feriel",        display: "Feriel",        role: "Video Editor", group: "video_editor", field: "videoEditors", match: ["feriel"],        alwaysShow: false },
   { slug: "nadish",        display: "Nadish",        role: "Video Editor", group: "video_editor", field: "videoEditors", match: ["nadish"],        alwaysShow: false },
+  { slug: "muhammad-abdullah", display: "Muhammad Abdullah", role: "Video Editor", group: "video_editor", field: "videoEditors", match: ["abdullah"], alwaysShow: false },
   // === Designers === (matched via item.assignee)
   { slug: "nayyab",  display: "Nayyab", role: "Designer", group: "designer", field: "designers", match: ["nayyab"],  alwaysShow: false },
   { slug: "lana",    display: "Lana",   role: "Designer", group: "designer", field: "designers", match: ["lana"],    alwaysShow: false },
