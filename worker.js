@@ -376,6 +376,7 @@ const BASE_STRUCTURES = {
   "app0W9ykqSCEOb3kj": { structure: "newer", tableIds: ["tblhU5yVNhVDwykUt"] }, // Nathan James — new client, Creative Base ID was empty, linked 2026-09-19
   "app4g7rLhZ0k4DZkU": { structure: "newer", tableIds: ["tblhU5yVNhVDwykUt"] }, // konstill d.o.o. (Automatten) — same missing-Creative-Base-ID gap, linked 2026-09-19
   "appsBOycIJ6PNoHWf": { structure: "newer", tableIds: ["tblhU5yVNhVDwykUt"] }, // Funding Fred — same missing-Creative-Base-ID gap, linked 2026-09-19
+  "appfdKTnRUTTh3mqc": { structure: "newer", tableIds: ["tblhU5yVNhVDwykUt"] }, // Rushie — same missing-Creative-Base-ID gap, linked 2026-10-13
   "appjimE8RAjvCc1gF": { structure: "newer", tableIds: ["tblhU5yVNhVDwykUt"] }, // Santa Mood — Creative Base ID was empty on the Clients record, excluding it from the active-clients query entirely; linked base found and structure verified 2026-08-03
   "appWhSYilpyREuhaL": { structure: "newer", tableIds: ["tblhU5yVNhVDwykUt"] }, // Bellalab — same missing-Creative-Base-ID gap as Santa Mood, found + linked 2026-08-04
   "appG4TkT8hvhv700X": { structure: "newer", tableIds: ["tblhU5yVNhVDwykUt"] }, // Pablo Quintanilla — same missing-Creative-Base-ID gap as Santa Mood, found + linked 2026-08-04
