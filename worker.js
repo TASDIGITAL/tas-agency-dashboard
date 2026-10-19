@@ -1241,9 +1241,11 @@ function growthStrategistMatches(client, personDef) {
     personDef.match.some((m) => String(name).toLowerCase().includes(m))
   );
   if (!nameMatches) return false;
-  // Growth Strategist: only match clients where we're doing creatives
-  const csList = client.creativeStrategists || [];
-  if (csList.length === 0) return false;
+  // Growth Strategist: show any client with this media buyer attached — a Meta/TikTok
+  // media buyer being linked at all means media buying is active for that brand, whether
+  // or not a Creative Strategist is also assigned (pure media-buying clients still need
+  // their ready ads surfaced to launch). Per Talal 2026-10-19: do not require a Creative
+  // Strategist here — that previously hid ads-to-launch for media-buying-only clients.
   return true;
 }
 
@@ -1798,12 +1800,10 @@ function personMatches(client, personDef) {
     personDef.match.some((m) => String(name).toLowerCase().includes(m))
   );
   if (!nameMatches) return false;
-  // Growth Strategist: only match clients where we're doing creatives
-  // (i.e. at least one Creative Strategist is assigned)
-  if (personDef.group === "growth_strategist") {
-    const csList = client.creativeStrategists || [];
-    if (csList.length === 0) return false;
-  }
+  // Growth Strategist: show any client with this media buyer attached, regardless of
+  // whether a Creative Strategist is also assigned — a pure media-buying client (Meta
+  // media buyer linked, no in-house creative strategist) still needs its ready ads
+  // surfaced to launch. Per Talal 2026-10-19: do not gate this on Creative Strategist.
   return true;
 }
 
